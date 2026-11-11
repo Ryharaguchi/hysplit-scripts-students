@@ -7,6 +7,7 @@ import queue
 import threading
 import traceback
 import uuid
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tkinter as tk
@@ -17,13 +18,16 @@ from .core import (execute_groups, expand_starts, fixed_starts, group_starts,
                    load_starts_csv, parse_heights, parse_time_offsets,
                    parse_utc, parse_xy_offsets, write_group)
 from .era5 import download_cds, download_google_arco
+from .era5_convert import convert_cds_to_arl
+from .plot import create_map
+from .validation import check_coverage
 from .meteo import download_noaa, local_arl_files, plan_archives
 
 PROVIDERS = {
     "GDAS1 | NOAA 全球1°・ARL（推奨）": "gdas1",
     "GFS 0.25° | NOAA 全球・ARL（大容量）": "gfs0p25",
     "手元のARLファイルを使用": "local",
-    "ERA5 | Copernicus CDS（取得のみ・GRIB）": "era5_cds",
+    "ERA5 | Copernicus CDS（外部api2arlで変換・実行）": "era5_cds",
     "ERA5 | Google ARCO（取得のみ・NetCDF）": "arco_era5",
 }
 UTC = timezone.utc
@@ -37,6 +41,7 @@ class App(tk.Tk):
         self.minsize(760, 620)
         self.events = queue.Queue()
         self.busy = False
+        self.last_run = None
         default_time = (datetime.now(UTC) - timedelta(days=14)).strftime("%Y-%m-%d 00:00")
         defaults = {
             "executable": r"C:\hysplit\exec\hyts_std.exe",
@@ -48,6 +53,8 @@ class App(tk.Tk):
             "hours": "48", "top": "20000", "height_ref": "MSL",
             "workers": "2", "max_points": "100",
             "provider": next(iter(PROVIDERS)), "local_met": "", "bbox": "",
+            "api2arl": "", "filedates": r"C:\hysplit\exec\filedates.exe",
+            "map_limit": "500",
         }
         self.v = {key: tk.StringVar(value=value) for key, value in defaults.items()}
         self._widgets()
@@ -120,6 +127,9 @@ class App(tk.Tk):
                      state="readonly", width=59).grid(row=0, column=1, sticky="ew", padx=5)
         self._entry(source, "ローカルARLファイル (複数選択可)", "local_met", 1, 55, self._pick_arl)
         self._entry(source, "ERA5の領域 N,W,S,E (空欄は自動)", "bbox", 2, 45)
+        self._entry(source, "api2arl実行ファイル (WSLは wsl:/...)", "api2arl", 4, 65)
+        self._entry(source, "NOAA filedates 実行ファイル", "filedates", 5, 65, self._pick_filedates)
+        self._entry(source, "地図表示の最大流跡線数", "map_limit", 6)
         ttk.Label(source, text="ERA5の領域は開始点周辺の推定値です。後方経路を必ず含むとは限りません。",
                   foreground="#855000").grid(row=3, column=0, columnspan=3, sticky="w", padx=5)
 
@@ -128,9 +138,9 @@ class App(tk.Tk):
             "NOAA GDAS1（全球1°）: ARLを自動取得して実行可能。週ファイルは約0.6GB。",
             "NOAA GFS 0.25°（全球）: ARLを自動取得して実行可能。日ファイル約3GB以上。",
             "ローカルARL: 手持ちのARL形式気象ファイルを使用して実行可能。",
-            "ERA5 CDS: GRIBを取得（cdsapi・アカウントが必要）。ARL変換は未実装。",
+            "ERA5 CDS: ecCodesと外部api2arlがあればGRIB→ARLに変換。filedatesによる時刻検証必須。",
             "Google ARCO ERA5: Google Cloud公開ZarrからNetCDFを抽出。ARL変換は未実装。",
-            "ERA5の取得ファイルは、そのままHYSPLITに入力できません。",
+            "ERA5は変数・座標変換を伴います。変換後もNOAA基準計算との照合が必要です。",
             "取得には大量のディスク容量・通信量が必要です。観測期間+後方計算期間を対象にします。",
         ]:
             ttk.Label(notes, text="• " + line, wraplength=820, justify="left").pack(anchor="w", pady=2)
@@ -140,7 +150,8 @@ class App(tk.Tk):
         self.buttons = [
             ttk.Button(bottom, text="計算内容をプレビュー", command=self.preview),
             ttk.Button(bottom, text="気象データを取得", command=lambda: self.start_task("download")),
-            ttk.Button(bottom, text="一括計算を開始（NOAA/ARL）", command=lambda: self.start_task("run")),
+            ttk.Button(bottom, text="一括計算を開始", command=lambda: self.start_task("run")),
+            ttk.Button(bottom, text="結果を地図で表示", command=self.plot_results),
         ]
         for button in self.buttons:
             button.pack(side="left", padx=5)
@@ -158,6 +169,11 @@ class App(tk.Tk):
         value = filedialog.askopenfilename(title="hyts_std.exe", filetypes=[("EXE", "*.exe"), ("All files", "*.*")])
         if value:
             self.v["executable"].set(value)
+
+    def _pick_filedates(self):
+        value = filedialog.askopenfilename(title="NOAA filedates", filetypes=[("Executable", "*.exe"), ("All files", "*.*")])
+        if value:
+            self.v["filedates"].set(value)
 
     def _pick_root(self):
         value = filedialog.askdirectory(title="HYSPLIT作業フォルダ")
@@ -201,6 +217,8 @@ class App(tk.Tk):
             raise ValueError("高度の基準は AGL または MSL です。")
         if not 1 <= int(conf["workers"]) <= 32:
             raise ValueError("並列数は1～32です。")
+        if not 1 <= int(conf["map_limit"]) <= 5000:
+            raise ValueError("地図表示上限は1～5000です。")
         earliest = min(p.when for p in points) - timedelta(hours=back_hours)
         latest = max(p.when for p in points)
         provider = PROVIDERS[conf["provider"]]
@@ -229,8 +247,10 @@ class App(tk.Tk):
                           ", ".join(p.name for p in plan[:8]) + (" ..." if len(plan) > 8 else ""))
                 if provider == "gfs0p25":
                     self._log("注意: GFS 0.25° は1日あたり約3GB以上（保存領域・帯域を確認）。")
-            elif provider in ("era5_cds", "arco_era5"):
-                self._log(f"ERA5: 取得のみ / ARL変換未対応 / bbox={bbox}")
+            elif provider == "era5_cds":
+                self._log(f"ERA5 CDS: bbox={bbox}. 外部api2arl・filedates設定時は変換して実行できます。")
+            elif provider == "arco_era5":
+                self._log(f"Google ARCO: NetCDFの取得のみ / ARL自動変換未対応 / bbox={bbox}")
             else:
                 self._log("ローカルARLファイル: 実行前にファイル存在確認します。")
         except Exception as exc:
@@ -241,9 +261,13 @@ class App(tk.Tk):
             return
         try:
             data = self._data()
-            if action == "run" and data[5] in ("era5_cds", "arco_era5"):
-                raise ValueError("ERA5/Googleの出力はまだARL形式ではありません。" 
-                                 "先に取得し、外部でARL変換・検証後、ローカルARLを選択してください。")
+            if action == "run" and data[5] == "arco_era5":
+                raise ValueError("Google ARCOのNetCDF→ARL変換は未対応です。CDSまたはNOAAを選択してください。")
+            if action == "run" and data[5] == "era5_cds":
+                if not data[0]["api2arl"]:
+                    raise ValueError("ERA5実行にはNOAA api2arlのパスが必要です。")
+                if not Path(data[0]["filedates"]).is_file():
+                    raise ValueError("ERA5実行にはNOAA filedatesによる変換結果の時刻検証が必要です。")
             if action == "run":
                 executable = Path(data[0]["executable"]).resolve()
                 if not executable.is_file():
@@ -275,8 +299,15 @@ class App(tk.Tk):
                 self._notify(f"Local ARL: {len(met_paths)} files selected")
             elif provider == "era5_cds":
                 results = download_cds(earliest, latest, met_dir, bbox, notify=self._notify)
-                self._notify(f"ERA5 GRIB downloaded ({len(results)} files). ARL conversion is required before running HYSPLIT.")
-                met_paths = []
+                self._notify(f"ERA5 GRIB downloaded ({len(results)} files).")
+                if action == "run":
+                    met_paths = convert_cds_to_arl(
+                        results, met_dir / "arl", earliest, latest,
+                        converter=conf["api2arl"], filedates=Path(conf["filedates"]),
+                        notify=self._notify)
+                else:
+                    self._notify("ERA5 GRIB ready. api2arl conversion is run only when starting HYSPLIT.")
+                    met_paths = []
             elif provider == "arco_era5":
                 result = download_google_arco(earliest, latest, met_dir, bbox, notify=self._notify)
                 self._notify(f"ARCO ERA5 saved: {result}. NetCDF is NOT HYSPLIT ARL input.")
@@ -284,13 +315,21 @@ class App(tk.Tk):
             else:
                 raise ValueError(f"Unsupported meteo source: {provider}")
             if action == "run":
+                coverage = check_coverage(met_paths, earliest, latest, Path(conf["filedates"]))
+                for message in coverage.messages:
+                    self._notify("Meteorology: " + message)
+                if provider == "era5_cds" and not coverage.verified:
+                    raise RuntimeError("ERA5 must pass ARL time coverage validation before running")
                 run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:6]
                 run_root = root / "runs" / run_id
                 run_root.mkdir(parents=True, exist_ok=False)
                 metadata = {"settings": conf, "meteorology": [str(p) for p in met_paths],
                             "start_count": len(points), "execution_count": len(groups),
                             "utc_bounds": [earliest.isoformat(), latest.isoformat()],
-                            "warning": "Filename planning cannot validate actual ARL temporal/vertical coverage."}
+                            "arl_times_verified": coverage.verified,
+                            "arl_times_first": coverage.first.isoformat() if coverage.first else None,
+                            "arl_times_last": coverage.last.isoformat() if coverage.last else None,
+                            "warning": "Time checks do not verify ARL grid extent, vertical fields or physical correctness."}
                 (run_root / "manifest.json").write_text(
                     json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 # Resolve HYSPLIT's installation-dependent terrain/land-use files.
@@ -310,12 +349,31 @@ class App(tk.Tk):
                                          int(conf["workers"]), notify=self._notify)
                 failures = sum(not success for _, success in results)
                 self._notify(f"FINISHED: {len(results)-failures}/{len(results)} successful. Output: {run_root}")
-                if failures:
-                    raise RuntimeError(f"{failures} failed HYSPLIT runs; inspect run.log/MESSAGE")
-            self.events.put(("done", None))
+                try:
+                    page, geojson, shown, total = create_map(
+                        run_root, max_trajectories=int(conf["map_limit"]))
+                    self._notify(f"Map: {page} / GeoJSON: {geojson} ({shown}/{total} trajectories)")
+                except (FileNotFoundError, ValueError, OSError) as exc:
+                    self._notify(f"Map not generated: {exc}")
+                self.events.put(("done", str(run_root)))
+            else:
+                self.events.put(("done", None))
         except Exception as exc:
             self.events.put(("error", str(exc)))
             self._notify(traceback.format_exc(limit=3))
+
+    def plot_results(self):
+        initial = self.last_run or (Path(self.v["root"].get()) / "runs")
+        folder = filedialog.askdirectory(title="HYSPLITの実行結果フォルダ (runs/実行ID)",
+                                          initialdir=str(initial))
+        if not folder:
+            return
+        try:
+            page, geojson, shown, total = create_map(Path(folder), max_trajectories=int(self.v["map_limit"].get()))
+            self._log(f"地図: {page} / GeoJSON: {geojson} ({shown}/{total} trajectories)")
+            webbrowser.open(page.resolve().as_uri())
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("地図生成エラー", str(exc))
 
     def _poll(self):
         try:
@@ -328,6 +386,8 @@ class App(tk.Tk):
                     for button in self.buttons:
                         button.configure(state="normal")
                     if event == "done":
+                        if payload:
+                            self.last_run = Path(payload)
                         self._log("完了しました。")
                     else:
                         self._log("ERROR: " + payload)

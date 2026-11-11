@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
-import shutil
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -53,31 +54,109 @@ def plan_archives(source: str, earliest: datetime, latest: datetime) -> list[Rem
 def download_arl_file(spec: RemoteFile, target_dir: Path,
                       notify: Callable[[str], None] | None = None,
                       opener=None) -> Path:
-    """Sequential HTTPS download with atomic rename and HTTP fallback; no partial files reused."""
+    """Download with checked HTTP Range resume and atomic final rename.
+
+    Resume requires a matching URL and an ETag or Last-Modified validator.
+    Server responses that ignore Range restart from byte zero, never append.
+    """
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / spec.name
     if target.is_file() and target.stat().st_size > 0:
+        from .validation import check_signature
+        check_signature(target)
         if notify:
             notify(f"CACHED {target.name}")
         return target
     partial = target.with_name(target.name + ".part")
+    metadata = target.with_name(target.name + ".part.json")
     errors = []
     opener = opener or urllib.request.urlopen
+
     for url in spec.urls:
-        try:
-            if notify:
-                notify(f"Downloading {spec.name} from {url}")
-            request = urllib.request.Request(url, headers={"User-Agent": "hysplit-students/0.1"})
-            with opener(request, timeout=90) as response, partial.open("wb") as stream:
-                shutil.copyfileobj(response, stream, length=1024 * 1024)
-            if partial.stat().st_size == 0:
-                raise OSError("Downloaded file is empty")
-            os.replace(partial, target)
-            return target
-        except (OSError, urllib.error.HTTPError, urllib.error.URLError) as exc:
-            errors.append(f"{url}: {exc}")
+        saved = {}
+        if partial.is_file() and metadata.is_file():
+            try:
+                saved = json.loads(metadata.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        if saved.get("url") != url:
             partial.unlink(missing_ok=True)
+            metadata.unlink(missing_ok=True)
+            saved = {}
+        existing = partial.stat().st_size if partial.is_file() else 0
+        validator = saved.get("etag") or saved.get("last_modified")
+        resume = existing > 0 and bool(validator)
+        if existing and not resume:
+            partial.unlink(missing_ok=True)
+            metadata.unlink(missing_ok=True)
+            existing = 0
+        headers = {"User-Agent": "hysplit-students/0.2"}
+        if resume:
+            headers.update({"Range": f"bytes={existing}-", "If-Range": validator})
+        if notify:
+            notify(f"{'Resuming' if resume else 'Downloading'} {spec.name} from {url}"
+                   + (f" at {existing:,} bytes" if resume else ""))
+        try:
+            request = urllib.request.Request(url, headers=headers)
+            with opener(request, timeout=90) as response:
+                status = getattr(response, "status", None) or 200
+                response_headers = getattr(response, "headers", {}) or {}
+                get_header = getattr(response_headers, "get", lambda _k, _v=None: None)
+                append = False
+                expected_total = None
+                if resume and status == 206:
+                    value = get_header("Content-Range", "") or ""
+                    match = re.fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+)", value.strip())
+                    if not match or int(match.group(1)) != existing:
+                        raise OSError(f"Invalid HTTP Content-Range for {spec.name}: {value!r}")
+                    start, stop, total = map(int, match.groups())
+                    if stop < start or total <= stop:
+                        raise OSError(f"Invalid HTTP Content-Range total: {value!r}")
+                    expected_total = total
+                    append = True
+                elif status not in (200, 206):
+                    raise OSError(f"Unexpected HTTP status {status} for {spec.name}")
+                elif status == 206:
+                    raise OSError("Unexpected HTTP 206 response without a Range request")
+                elif resume and notify:
+                    notify("Server ignored Range; safely restarting download from byte zero")
+                length = get_header("Content-Length")
+                if length is not None:
+                    size = int(length)
+                    if size < 0:
+                        raise OSError("Invalid Content-Length")
+                    if append and expected_total != existing + size:
+                        raise OSError("Range length does not match Content-Length")
+                    if not append:
+                        expected_total = size
+
+                metadata.write_text(json.dumps({
+                    "url": url,
+                    "etag": get_header("ETag") or (saved.get("etag") if append else None),
+                    "last_modified": get_header("Last-Modified")
+                        or (saved.get("last_modified") if append else None),
+                }), encoding="utf-8")
+                with partial.open("ab" if append else "wb") as stream:
+                    while True:
+                        block = response.read(1024 * 1024)
+                        if not block:
+                            break
+                        stream.write(block)
+                actual = partial.stat().st_size
+                if not actual or (expected_total is not None and actual != expected_total):
+                    raise OSError(f"Incomplete download {spec.name}: {actual} of {expected_total} bytes")
+                with partial.open("rb") as stream:
+                    first = stream.read(128).lstrip().lower()
+                if first.startswith((b"<!doctype", b"<html", b"<?xml", b"{\"error\"")):
+                    raise OSError("Server returned an HTML/XML/JSON error rather than meteorology")
+                os.replace(partial, target)
+                metadata.unlink(missing_ok=True)
+                return target
+        except (OSError, urllib.error.HTTPError, urllib.error.URLError, ValueError) as exc:
+            errors.append(f"{url}: {exc}")
+            # A different fallback endpoint may not have identical bytes.
+            # Keep a partial only for a future attempt at the *same* URL.
     raise RuntimeError(f"Could not download {spec.name}. Tried: " + "; ".join(errors))
 
 

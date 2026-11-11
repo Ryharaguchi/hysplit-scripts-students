@@ -4,11 +4,18 @@ on:
   pull_request:
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Compile all Python sources
+        run: python -m compileall -q hysplit_tool tests run_gui.py
+      - name: Verify GUI module imports
+        run: python -c "import hysplit_tool.gui"
       - name: Unit tests (no HYSPLIT binary or external API required)
         run: python -m unittest discover -s tests -v

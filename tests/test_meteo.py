@@ -49,7 +49,7 @@ class TestMeteo(unittest.TestCase):
             self.assertFalse((Path(td) / "met.bin.part").exists())
             self.assertEqual(download_arl_file(spec, Path(td), opener=fake_urlopen), path)
             self.assertEqual(len(seen), 1)
-            self.assertEqual(local_arl_files(str(path)), [path])
+            self.assertEqual(local_arl_files(str(path)), [path.resolve()])
 
     def test_era5_bounding_region_and_months(self):
         self.assertEqual(region_around(35, 135), (60, 100, 10, 170))
