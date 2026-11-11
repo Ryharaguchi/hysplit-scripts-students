@@ -70,7 +70,7 @@ class TestCore(unittest.TestCase):
             met.write_bytes(b"FAKE ARL")
             folder = write_group(group_starts(points)[0], base / "run", [met], 48, 20000, "MSL", bdy)
             self.assertIn("KMSL = 1", (folder / "SETUP.CFG").read_text())
-            self.assertIn(bdy.as_posix() + "/", (folder / "ASCDATA.CFG").read_text())
+            self.assertIn(bdy.resolve().as_posix() + "/", (folder / "ASCDATA.CFG").read_text())
             self.assertIn("gdas1.oct26.w2", (folder / "CONTROL").read_text())
             with (folder / "starts.csv").open() as file:
                 self.assertEqual(list(csv.DictReader(file))[0]["trajectory_number"], "1")
