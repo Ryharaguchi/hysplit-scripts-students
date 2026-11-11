@@ -56,7 +56,8 @@ class TestEra5ConversionBridge(unittest.TestCase):
                 Path(cwd, "output.arl").write_bytes(b"ARL hourly record")
                 return CompletedProcess(args, 0, stdout="OK", stderr="")
 
-            def fake_check(paths, earliest, latest, filedates):
+            def fake_check(paths, earliest, latest, filedates, *, max_gap_hours):
+                self.assertAlmostEqual(max_gap_hours, 1.01)
                 self.assertEqual(len(paths), 2)
                 self.assertTrue(all(p.name.endswith(".part") for p in paths))
                 return CoverageReport(True, ("verified",))
