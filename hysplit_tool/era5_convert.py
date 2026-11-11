@@ -199,7 +199,7 @@ def convert_cds_to_arl(source_files: list[Path], destination: Path,
                 staged.unlink(missing_ok=True)
                 raise
         staged_paths = [path for _output, path in outputs]
-        check_coverage(staged_paths, earliest, latest, filedates)
+        check_coverage(staged_paths, earliest, latest, filedates, max_gap_hours=1.01)
         for output, staged in outputs:
             staged.replace(output)
         return [output for output, _stage in outputs]
