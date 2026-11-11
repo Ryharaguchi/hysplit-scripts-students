@@ -1,0 +1,6 @@
+# Only for optional ERA5 data acquisition. Not required for NOAA ARL or the GUI.
+cdsapi>=0.7
+xarray>=2024.1
+zarr>=3.0
+gcsfs>=2024.1
+netCDF4>=1.6
