@@ -139,7 +139,16 @@ if (typeof L !== 'undefined') {
   const colors = ['#1660a1','#d65c32','#237c58','#8a42a0','#aa8b18'];
   const all = L.featureGroup().addTo(map);
   collection.features.forEach((feature, index) => {
-    const line = feature.geometry.coordinates.map(p => [p[1],p[0]]);
+    let previous = null;
+    const line = feature.geometry.coordinates.map(p => {
+      let lon = p[0];
+      if (previous !== null) {
+        while (lon - previous > 180) lon -= 360;
+        while (lon - previous < -180) lon += 360;
+      }
+      previous = lon;
+      return [p[1],lon];
+    });
     const poly = L.polyline(line, {color: colors[index % colors.length], weight: 1.8,
       opacity: 0.7}).addTo(all);
     const props = feature.properties;
