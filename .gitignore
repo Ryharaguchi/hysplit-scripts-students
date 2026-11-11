@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+.cdsapirc
+*.part
+met/
+runs/
+*.grib
+*.grib2
+*.nc
+*.arl
+tdump
+MESSAGE
