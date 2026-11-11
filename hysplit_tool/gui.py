@@ -363,7 +363,9 @@ class App(tk.Tk):
             self._notify(traceback.format_exc(limit=3))
 
     def plot_results(self):
-        folder = self.last_run or filedialog.askdirectory(title="HYSPLITの実行結果フォルダ (runs/実行ID)")
+        initial = self.last_run or (Path(self.v["root"].get()) / "runs")
+        folder = filedialog.askdirectory(title="HYSPLITの実行結果フォルダ (runs/実行ID)",
+                                          initialdir=str(initial))
         if not folder:
             return
         try:
