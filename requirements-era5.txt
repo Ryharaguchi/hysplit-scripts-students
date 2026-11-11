@@ -4,3 +4,6 @@ xarray>=2024.1
 zarr>=3.0
 gcsfs>=2024.1
 netCDF4>=1.6
+# Optional ERA5 GRIB1/2 -> GRIB2 preprocessing for NOAA api2arl
+eccodes>=2.38
+numpy>=1.26
