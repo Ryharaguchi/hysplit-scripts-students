@@ -63,6 +63,8 @@ def download_arl_file(spec: RemoteFile, target_dir: Path,
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / spec.name
     if target.is_file() and target.stat().st_size > 0:
+        from .validation import check_signature
+        check_signature(target)
         if notify:
             notify(f"CACHED {target.name}")
         return target
