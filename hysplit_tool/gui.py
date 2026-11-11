@@ -53,7 +53,7 @@ class App(tk.Tk):
             "hours": "48", "top": "20000", "height_ref": "MSL",
             "workers": "2", "max_points": "100",
             "provider": next(iter(PROVIDERS)), "local_met": "", "bbox": "",
-            "api2arl": "", "filedates": r"C:\\hysplit\\exec\\filedates.exe",
+            "api2arl": "", "filedates": r"C:\hysplit\exec\filedates.exe",
             "map_limit": "500",
         }
         self.v = {key: tk.StringVar(value=value) for key, value in defaults.items()}
