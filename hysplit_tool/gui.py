@@ -351,6 +351,20 @@ class App(tk.Tk):
                     )
                 exported = export_run_csv(run_root, height_reference=conf["height_ref"],
                                           group_folders=folders)
+                metadata["results_csv"] = exported.path.name
+                metadata["results_trajectories"] = exported.trajectories
+                metadata["results_endpoints"] = exported.endpoints
+                metadata["results_missing_terrain_endpoints"] = exported.missing_terrain_endpoints
+                metadata["results_height_convention"] = {
+                    "tdump": "KAGL=1 (AGL meters)",
+                    "terrain": "TM_TERR=1 (model-derived TERR_MSL)",
+                    "msl_estimate": "trajectory_height_agl_m + terrain_elevation_msl_m",
+                    "geopotential_estimate": "R*h/(R+h), R=6371008.8 m, spherical approximation",
+                    "not_measured_era5_geopotential": True,
+                }
+                (run_root / "manifest.json").write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
                 self._notify(
                     f"Batch CSV: {exported.path} | {exported.trajectories} trajectories, "
                     f"{exported.endpoints} endpoints; "
