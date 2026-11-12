@@ -253,7 +253,7 @@ def expand_observations(bases: Iterable[StartPoint], distance_km: float,
     if not math.isfinite(distance_km) or distance_km < 0 or distance_km > 10000:
         raise ValueError("Horizontal distance must be within 0..10000 km")
     if (not math.isfinite(time_shift_minutes) or time_shift_minutes < 0
-            or time_shift_minutes > 10080 or not time_shift_minutes.is_integer()):
+            or time_shift_minutes > 10080 or not float(time_shift_minutes).is_integer()):
         raise ValueError("Time shift must be a whole number of minutes (0..10080)")
     bases = list(bases)
     shifts = [0.0] if not time_shift_minutes else [
