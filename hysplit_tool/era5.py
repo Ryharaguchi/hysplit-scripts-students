@@ -21,6 +21,14 @@ PRESSURE_LEVELS = ["1000", "925", "850", "700", "600", "500",
 SURFACE_FIELDS = ["2m_temperature", "10m_u_component_of_wind",
                   "10m_v_component_of_wind", "surface_pressure",
                   "total_precipitation", "boundary_layer_height", "geopotential"]
+# In the Google ARCO pressure/surface dataset, static surface geopotential has
+# a distinct variable name from the three-dimensional pressure geopotential.
+ARCO_SURFACE_FIELDS = [
+    "2m_temperature", "10m_u_component_of_wind", "10m_v_component_of_wind",
+    "surface_pressure", "total_precipitation", "boundary_layer_height",
+    "geopotential_at_surface",
+]
+ARCO_PRESSURE_LEVELS = [int(level) for level in PRESSURE_LEVELS]
 
 def region_around(lat: float, lon: float, lat_radius: float = 25, lon_radius: float = 35):
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
@@ -94,7 +102,7 @@ def download_cds(earliest: datetime, latest: datetime, target_dir: Path,
 def download_google_arco(earliest: datetime, latest: datetime, target_dir: Path,
                          bbox: tuple[float, float, float, float],
                          notify: Callable[[str], None] | None = None) -> Path:
-    """Export an area/time slice of Google public ARCO ERA5 as NetCDF (NOT ARL).
+    """Export an ARL-convertible ARCO 0.25-degree NetCDF regional subset.
 
     Zarr chunks can be whole global fields despite small-area selection;
     downloads may be substantial. This adapter requires xarray/zarr/gcsfs/netCDF.
@@ -113,7 +121,7 @@ def download_google_arco(earliest: datetime, latest: datetime, target_dir: Path,
     if notify:
         notify("Opening Google Cloud ARCO ERA5: a tiny spatial crop may still read very large Zarr chunks")
     # Google's documented anonymous ARCO store.
-    ds = xr.open_zarr(ARCO_URL, storage_options={"token": "anon"})
+    ds = xr.open_zarr(ARCO_URL, storage_options={"token": "anon"}, chunks=None)
     # Dataset longitudes may be 0..360; use coordinate masks to handle 0-degree crossings.
     lon = ds.longitude
     if float(lon.min()) >= 0:
@@ -130,18 +138,28 @@ def download_google_arco(earliest: datetime, latest: datetime, target_dir: Path,
     selection = selection.sel(longitude=selection.longitude.where(select_lon, drop=True))
     if not selection.sizes.get("time") or not selection.sizes.get("latitude") or not selection.sizes.get("longitude"):
         raise ValueError("Selected ERA5 window is empty (check dates and region)")
-    # Dataset is pressure-level + surface. Selecting all 37 levels can be expensive.
-    available = [name for name in PRESSURE_FIELDS + SURFACE_FIELDS if name in selection.data_vars]
-    if not all(name in available for name in PRESSURE_FIELDS):
-        missing = set(PRESSURE_FIELDS) - set(available)
-        raise ValueError(f"ARCO dataset lacks expected pressure-level variables: {sorted(missing)}")
-    selected = selection[available]
+    required = PRESSURE_FIELDS + ARCO_SURFACE_FIELDS
+    missing = sorted(set(required) - set(selection.data_vars))
+    if missing:
+        raise ValueError(f"ARCO dataset lacks ARL conversion variables: {missing}")
+    if "level" not in selection.coords:
+        raise ValueError("ARCO pressure-level coordinate missing")
+    actual = set(int(x) for x in selection.level.values)
+    absent = sorted(set(ARCO_PRESSURE_LEVELS) - actual)
+    if absent:
+        raise ValueError(f"ARCO missing pressure levels: {absent}")
+    selected = selection[required].sel(level=ARCO_PRESSURE_LEVELS)
     region_id = hashlib.sha256(repr(tuple(bbox)).encode("ascii")).hexdigest()[:8]
     result = target_dir / f"arco_era5_{earliest:%Y%m%dT%H%M}_{latest:%Y%m%dT%H%M}_{region_id}.nc"
+    if result.is_file() and result.stat().st_size:
+        ds.close()
+        if notify:
+            notify(f"Reusing ARCO NetCDF cache: {result.name}")
+        return result
     temp = result.with_suffix(".part")
     try:
         if notify:
-            notify("Exporting Google ARCO ERA5 subset as NetCDF (NOT ready for HYSPLIT)")
+            notify("Exporting 0.25-degree Google ARCO pressure/surface NetCDF for native ARL conversion")
         selected.to_netcdf(temp, engine="netcdf4")
         temp.replace(result)
     finally:

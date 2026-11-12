@@ -4,3 +4,7 @@ xarray>=2024.1
 zarr>=3.0
 gcsfs>=2024.1
 netCDF4>=1.6
+
+# Native Windows ARCO NetCDF -> GRIB1 -> ARL adapter
+numpy>=1.26
+eccodes>=2.43

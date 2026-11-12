@@ -15,10 +15,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
-from .core import (JST, execute_groups, expand_observations, group_starts,
-                   load_starts_csv, write_group)
+from .core import (JST, automatic_model_top, execute_groups, expand_observations,
+                   group_starts, load_starts_csv, write_group)
 from .era5 import download_cds, download_google_arco
 from .native_era5 import convert_cds_grib1_to_arl
+from .arco_convert import convert_arco_netcdf_to_arl
 from .plot import create_map
 from .platform_guard import require_native_windows
 from .validation import check_coverage
@@ -59,7 +60,7 @@ class App(tk.Tk):
         defaults = {
             "executable": str(detected_executable), "root": str(work_root),
             "csv": "", "distance_km": "0", "time_shift_minutes": "0",
-            "hours": "48", "top": "20000", "height_ref": "MSL",
+            "hours": "48", "height_ref": "MSL",
             "workers": "2", "max_points": "100",
             "provider": next(iter(PROVIDERS)), "local_met": "",
         }
@@ -120,12 +121,11 @@ class App(tk.Tk):
 
         run_settings = self._group(setup_content, "後方流跡線の計算条件")
         self._entry(run_settings, "何時間前まで遡るか [h]", "hours", 0)
-        self._entry(run_settings, "計算領域の上限高度 [m AGL]", "top", 1)
-        ttk.Label(run_settings, text="CSVの高度の基準").grid(row=2, column=0, sticky="w", padx=5)
+        ttk.Label(run_settings, text="CSVの高度の基準").grid(row=1, column=0, sticky="w", padx=5)
         ttk.Combobox(run_settings, textvariable=self.v["height_ref"], values=["AGL", "MSL"],
-                     state="readonly", width=10).grid(row=2, column=1, sticky="w", padx=5)
-        self._entry(run_settings, "同時に動かす計算プロセス数 (1～32)", "workers", 3)
-        self._entry(run_settings, "1実行当たり最大開始点数", "max_points", 4)
+                     state="readonly", width=10).grid(row=1, column=1, sticky="w", padx=5)
+        self._entry(run_settings, "同時に動かす計算プロセス数 (1～32)", "workers", 2)
+        self._entry(run_settings, "1実行当たり最大開始点数", "max_points", 3)
 
         source = self._group(meteo, "データソースの選択")
         ttk.Label(source, text="気象データ").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -144,7 +144,7 @@ class App(tk.Tk):
             "GFS 0.25°：全球 0.25°格子。NOAAのARLデータを取得して計算。",
             "ローカルARL: 手元のARLファイルで計算します。",
             "ERA5 CDS：0.25°×0.25°の配布格子（大気解析の実効分解能は約31 km）。GRIB1をARL変換（試験的）。",
-            "ERA5 Google ARCO：0.25°×0.25°格子。NetCDF取得まで。ARL変換は未対応。",
+            "ERA5 Google ARCO：0.25°×0.25°格子。NetCDF→GRIB1→ARL変換（Windows、試験的）。",
             "grib2arl.exeとfiledates.exeはHYSPLITの実行フォルダから自動検出します。",
             "出力：全流跡線を1つのtrajectories.csvに集約。別途オフライン図とGeoJSONも保存。",
             "取得には大量のディスク容量・通信量が必要です。観測期間+後方計算期間を対象にします。",
@@ -207,9 +207,12 @@ class App(tk.Tk):
             bases, float(conf["distance_km"]), float(conf["time_shift_minutes"]))
         groups = group_starts(points, max_points=int(conf["max_points"]))
         back_hours = int(conf["hours"])
-        top = float(conf["top"])
-        if back_hours <= 0 or back_hours > 9999 or top <= 0 or any(p.height_m >= top for p in points):
-            raise ValueError("後方時間 (1..9999 h) とモデル上端（初期高度より高い値）を確認してください。")
+        if back_hours <= 0 or back_hours > 9999:
+            raise ValueError("後方計算時間は1～9999時間で指定してください。")
+        # HYSPLIT CONTROL *requires* a vertical model-top value. Keep it
+        # internal, at least 20 km AGL or 1 km above the largest CSV start.
+        internal_top = automatic_model_top(points)
+        conf["internal_model_top_m_agl"] = str(internal_top)
         if conf["height_ref"] not in ("AGL", "MSL"):
             raise ValueError("高度の基準は AGL または MSL です。")
         if not 1 <= int(conf["workers"]) <= 32:
@@ -243,7 +246,8 @@ class App(tk.Tk):
             elif provider == "era5_cds":
                 self._log(f"ERA5(CDS): bbox={bbox}。GRIB1をWindowsのgrib2arl.exeで変換します。")
             elif provider == "arco_era5":
-                self._log(f"Google ARCO: NetCDFの取得のみ / ARL自動変換未対応 / bbox={bbox}")
+                self._log(f"Google ARCO: 0.25° NetCDFを取得しWindowsのecCodesでGRIB1化、"
+                          f"grib2arl.exeでARLに変換します（試験的）。自動領域={bbox}")
             else:
                 self._log("ローカルARLファイル: 実行前にファイル存在確認します。")
         except Exception as exc:
@@ -254,8 +258,6 @@ class App(tk.Tk):
             return
         try:
             data = self._data()
-            if action == "run" and data[5] == "arco_era5":
-                raise ValueError("Google ARCOのNetCDF→ARL変換は未対応です。CDSまたはNOAAを選択してください。")
             if data[5] == "era5_cds":
                 exec_dir = Path(data[0]["executable"]).resolve().parent
                 missing = [name for name in ("grib2arl.exe", "filedates.exe")
@@ -300,8 +302,11 @@ class App(tk.Tk):
                 self._notify(f"ERA5 ARL conversion complete: {len(met_paths)} files")
             elif provider == "arco_era5":
                 result = download_google_arco(earliest, latest, met_dir, bbox, notify=self._notify)
-                self._notify(f"ARCO ERA5 saved: {result}. NetCDF is NOT HYSPLIT ARL input.")
-                met_paths = []
+                self._notify(f"ARCO ERA5 NetCDF ready: {result}")
+                met_paths = convert_arco_netcdf_to_arl(
+                    result, met_dir / "arl", earliest, latest,
+                    hysplit_executable=Path(conf["executable"]), notify=self._notify)
+                self._notify(f"ARCO NetCDF -> ARL complete: {len(met_paths)} files")
             else:
                 raise ValueError(f"Unsupported meteo source: {provider}")
             if action == "run":
@@ -309,7 +314,7 @@ class App(tk.Tk):
                 coverage = check_coverage(met_paths, earliest, latest, filedates)
                 for message in coverage.messages:
                     self._notify("Meteorology: " + message)
-                if provider == "era5_cds" and not coverage.verified:
+                if provider in ("era5_cds", "arco_era5") and not coverage.verified:
                     raise RuntimeError("ERA5 must pass ARL time coverage validation before running")
                 run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:6]
                 run_root = root / "runs" / run_id
@@ -338,7 +343,8 @@ class App(tk.Tk):
                         "HYSPLITの正式なインストールフォルダ内の hyts_std.exe を指定してください。"
                     )
                 folders = [write_group(g, run_root, met_paths, int(conf["hours"]),
-                                       float(conf["top"]), conf["height_ref"], bdyfiles)
+                                       float(conf["internal_model_top_m_agl"]),
+                                       conf["height_ref"], bdyfiles)
                            for g in groups]
                 self._notify(f"Prepared {len(folders)} runs in {run_root}")
                 results = execute_groups(Path(conf["executable"]), folders,
@@ -398,8 +404,8 @@ class App(tk.Tk):
             "【観測時刻の前後】\n"
             "0分は観測時刻のみ。30分は前30分・観測時刻・後30分の3通り。\n\n"
             "【後方計算時間】\nCSVの時刻から何時間過去へ遡るか。\n\n"
-            "【計算領域の上限高度】\nHYSPLITの鉛直計算範囲の上限（m AGL）。"
-            "流跡線が上限に達すると計算は終了します。\n\n"
+            "【モデル上端】\nHYSPLIT内部で自動設定するため入力は不要です。"
+            "20,000m AGL以上、またはCSV最大高度+1,000m以上を確保します。\n\n"
             "【同時計算プロセス数】\n同時に実行するWindows版HYSPLITの数。"
             "流跡線の総本数ではありません。\n\n"
             "【出力】\n一括計算ごとにtrajectories.csvに全軌跡を集約。"
@@ -408,7 +414,7 @@ class App(tk.Tk):
             "GDAS1/GFS: NOAA ARLを自動取得しWindows上で計算。\n"
             "ローカルARL: 保存済みARLを使用。\n"
             "ERA5(CDS): GRIB1をWindowsのgrib2arl.exeで変換して計算（試験的）。\n"
-            "ERA5(Google ARCO): NetCDF取得のみ。ARL自動変換は未対応。"
+            "ERA5(Google ARCO): NetCDF→GRIB1→ARLをWindowsで変換（試験的）。"
         )
 
     def plot_results(self):

@@ -330,6 +330,18 @@ def group_starts(starts: Iterable[StartPoint], max_points: int = 100) -> list[Ru
     return result
 
 
+def automatic_model_top(starts: Iterable[StartPoint]) -> float:
+    """HYSPLIT CONTROL upper-bound, hidden from the user's GUI.
+
+    CSV determines initial heights, not the possible altitude reached along a
+    backward trajectory; CONTROL still requires a model top in metres AGL.
+    """
+    heights = [point.height_m for point in starts]
+    if not heights:
+        raise ValueError("Cannot configure HYSPLIT model top without start points")
+    return max(20000.0, 1000.0 * math.ceil((max(heights) + 1000.0) / 1000.0))
+
+
 def render_control(group: RunGroup, met_paths: list[Path], back_hours: int, model_top_m: float) -> str:
     if back_hours <= 0 or back_hours > 9999:
         raise ValueError("Backward duration must be 1..9999 hours")
