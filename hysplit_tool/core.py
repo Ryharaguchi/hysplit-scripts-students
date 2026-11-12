@@ -131,9 +131,9 @@ def parse_jst(value: str) -> datetime:
       YYYY/MM/DD HH:MM[:SS], YYYY-MM-DD HH:MM[:SS],
       YYYY.MM.DD HH:MM[:SS], YYYYMMDDHHMM[SS],
       ISO-8601 with T and optional Z/+09:00, and optional JST/UTC suffix.
-    A timezone offset always overrides the JST default. Seconds are accepted,
-    but HYSPLIT start times are minute-resolution, so nonzero seconds are
-    rejected rather than silently rounded.
+    A timezone offset always overrides the JST default. HYSPLIT accepts
+    start times to minute precision, so seconds round to the nearest minute
+    (>=30 seconds rounds up). Keep the original CSV for reproducibility.
     """
     original = value.strip()
     if not original:
@@ -159,13 +159,14 @@ def parse_jst(value: str) -> datetime:
         raise ValueError(
             f"Invalid observation time {value!r}; expected YYYY/MM/DD HH:MM[:SS] (JST)"
         ) from exc
-    if dt.second or dt.microsecond:
-        raise ValueError("Observation seconds must be 00 (HYSPLIT starts on whole minutes)")
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=explicit or JST)
     elif explicit is not None:
         raise ValueError("Specify either a UTC offset or JST/UTC suffix, not both")
-    return dt.astimezone(UTC)
+    utc = dt.astimezone(UTC)
+    # HYSPLIT accepts starts only to the minute. Round half up for
+    # real-world radiosonde CSV timestamps that carry seconds.
+    return (utc + timedelta(seconds=30)).replace(second=0, microsecond=0)
 
 
 def _csv_header(row: list[str]) -> bool:
