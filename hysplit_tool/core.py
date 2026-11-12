@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .platform_guard import require_native_windows
+from .met_diagnostics import flags_for_setup
 
 UTC = timezone.utc
 JST = timezone(timedelta(hours=9), name="JST")
@@ -362,7 +363,8 @@ def render_control(group: RunGroup, met_paths: list[Path], back_hours: int, mode
 
 def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hours: int,
                 model_top_m: float, height_reference: str = "AGL",
-                bdyfiles_dir: Path | None = None) -> Path:
+                bdyfiles_dir: Path | None = None,
+                diagnostics: Iterable[str] = ()) -> Path:
     if height_reference not in ("AGL", "MSL"):
         raise ValueError("Height reference must be AGL or MSL")
     folder = Path(run_root) / f"{group.when:%Y%m%dT%H%MZ}_{group.ordinal:05d}"
@@ -377,7 +379,9 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
         " KAGL = 1,\n"
         " TM_TERR = 1,\n"
         " TM_PRES = 1,\n"
-        "/\n",
+        " TFMT = 2,\n"
+        + flags_for_setup(diagnostics)
+        + "/\n",
         encoding="ascii",
     )
     # Per NOAA, each independent cwd needs its own ASCDATA.CFG to locate

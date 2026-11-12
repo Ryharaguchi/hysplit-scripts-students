@@ -17,6 +17,9 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterable
+
+from .met_diagnostics import MeteorologicalVariable, selected_variables
 
 UTC = timezone.utc
 JST = timezone(timedelta(hours=9), "JST")
@@ -87,7 +90,8 @@ def _load_starts(group: Path) -> dict[int, dict[str, str]]:
 
 
 def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
-                height_reference: str, group_id: str):
+                height_reference: str, group_id: str,
+                requested: tuple[MeteorologicalVariable, ...] = ()):
     """Yield endpoint rows with diagnostic names read from tdump record #5."""
     with path.open("r", encoding="ascii", errors="replace") as handle:
         header = handle.readline().split()
@@ -114,6 +118,15 @@ def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
                 raise ValueError("Invalid meteorological diagnostic header")
             if height_reference not in ("AGL", "MSL"):
                 raise ValueError("Unknown source altitude convention")
+            # NOAA defines output order, not the GUI. Match record #5 labels
+            # by name and reject absent requested fields instead of creating
+            # falsely valid empty columns.
+            missing = [item.tdump_label for item in requested
+                       if item.tdump_label not in labels]
+            if missing:
+                raise ValueError(
+                    f"Requested meteorological output missing from tdump {path}: {missing}"
+                )
         except (ValueError, IndexError) as exc:
             raise ValueError(f"Invalid HYSPLIT tdump header: {path}: {exc}") from exc
 
@@ -149,7 +162,7 @@ def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
             start_utc = start_utc.astimezone(UTC)
             origin = start.get("origin", "")
             source_row = origin.partition(":")[2] if origin.startswith("csv:") else ""
-            yield {
+            row = {
                 "run_group": group_id,
                 "trajectory_number": idx,
                 "source_csv_row": source_row,
@@ -170,10 +183,16 @@ def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
                 "trajectory_height_msl_m_est": _plain_number(msl, 2),
                 "trajectory_geopotential_height_m_est": _plain_number(geo_est, 2),
             }
+            for variable in requested:
+                row[variable.csv_column] = _plain_number(
+                    diagnostics.get(variable.tdump_label), 2
+                )
+            yield row
 
 
 def export_run_csv(run_root: Path, *, height_reference: str = "MSL",
-                   group_folders: list[Path] | None = None) -> ExportResult:
+                   group_folders: list[Path] | None = None,
+                   selected_diagnostics: Iterable[str] = ()) -> ExportResult:
     """Aggregate all tdump endpoints into one UTF-8 BOM CSV per batch.
 
     A missing required group or truncated tdump fails closed. The result
@@ -181,6 +200,10 @@ def export_run_csv(run_root: Path, *, height_reference: str = "MSL",
     successful research calculation.
     """
     root = Path(run_root)
+    requested = selected_variables(selected_diagnostics)
+    column_names = OUTPUT_COLUMNS + tuple(
+        item.csv_column for item in requested
+    )
     groups = sorted(map(Path, group_folders)) if group_folders is not None else sorted(
         folder for folder in root.iterdir() if folder.is_dir() and (folder / "tdump").is_file())
     if not groups:
@@ -194,7 +217,7 @@ def export_run_csv(run_root: Path, *, height_reference: str = "MSL",
     unique_tracks = set()
     try:
         with partial.open("w", newline="", encoding="utf-8-sig") as handle:
-            writer = csv.DictWriter(handle, fieldnames=OUTPUT_COLUMNS)
+            writer = csv.DictWriter(handle, fieldnames=column_names)
             writer.writeheader()
             for group in groups:
                 starts = _load_starts(group)
@@ -202,7 +225,9 @@ def export_run_csv(run_root: Path, *, height_reference: str = "MSL",
                 dump = group / "tdump"
                 if not dump.is_file():
                     raise FileNotFoundError(f"Missing tdump for HYSPLIT group: {group}")
-                for item in _tdump_rows(dump, starts, height_reference, group.name):
+                for item in _tdump_rows(
+                    dump, starts, height_reference, group.name, requested
+                ):
                     index = item["trajectory_number"]
                     seen.add(index)
                     writer.writerow(item)

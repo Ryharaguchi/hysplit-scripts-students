@@ -24,6 +24,7 @@ from .plot import create_map
 from .platform_guard import require_native_windows
 from .validation import check_coverage
 from .meteo import download_noaa, local_arl_files, plan_archives
+from .met_diagnostics import MET_VARIABLES, DEFAULT_MET_VARIABLES, selected_variables
 from .portable import default_work_root, find_hysplit_executable
 from .csv_export import export_run_csv
 
@@ -62,6 +63,10 @@ class App(tk.Tk):
             "provider": next(iter(PROVIDERS)), "local_met": "",
         }
         self.v = {key: tk.StringVar(value=value) for key, value in defaults.items()}
+        self.met_checks = {
+            option.flag: tk.BooleanVar(value=(option.flag in DEFAULT_MET_VARIABLES))
+            for option in MET_VARIABLES
+        }
         self._widgets()
         self.after(100, self._poll)
 
@@ -123,6 +128,20 @@ class App(tk.Tk):
                      state="readonly", width=10).grid(row=1, column=1, sticky="w", padx=5)
         self._entry(run_settings, "同時に動かす計算プロセス数 (1～32)", "workers", 2)
         self._entry(run_settings, "1実行当たり最大開始点数", "max_points", 3)
+
+        extras = self._group(setup_content, "流跡線上に出力する気象変数")
+        ttk.Label(
+            extras,
+            text="気圧 [hPa] と地表標高 [m MSL] は常に保存します。"
+                 "以下は必要な項目だけチェックしてください。",
+            foreground="#465d71",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=5, pady=(2, 7))
+        for index, option in enumerate(MET_VARIABLES):
+            ttk.Checkbutton(
+                extras, text=f"{option.japanese_label} [{option.unit}]",
+                variable=self.met_checks[option.flag],
+            ).grid(row=index // 2 + 1, column=index % 2,
+                   sticky="w", padx=(10, 22), pady=4)
 
         source = self._group(meteo, "データソースの選択")
         ttk.Label(source, text="気象データ").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -212,6 +231,10 @@ class App(tk.Tk):
     def _data(self):
         """Collect and validate everything in the GUI thread before a worker starts."""
         conf = {k: var.get().strip() for k, var in self.v.items()}
+        conf["met_diagnostics"] = [
+            option.flag for option in MET_VARIABLES if self.met_checks[option.flag].get()
+        ]
+        selected_variables(conf["met_diagnostics"])
         bases = load_starts_csv(Path(conf["csv"]))
         points = expand_observations(
             bases, float(conf["distance_km"]), float(conf["time_shift_minutes"]))
@@ -245,6 +268,11 @@ class App(tk.Tk):
             conf, points, groups, earliest, latest, provider, bbox = self._data()
             self._log(f"プレビュー: CSV {len(load_starts_csv(Path(conf['csv']))):,}行 → "
                       f"{len(points):,}本 / {len(groups):,}回実行")
+            chosen = selected_variables(conf["met_diagnostics"])
+            self._log(
+                "出力する気象変数: 気圧・地表標高（常時）" +
+                ("、" + "、".join(item.japanese_label for item in chosen) if chosen else "")
+            )
             self._log(f"必要気象期間(JST): {earliest.astimezone(JST):%Y-%m-%d %H:%M} ～ "
                       f"{latest.astimezone(JST):%Y-%m-%d %H:%M}")
             if provider in ("gdas1", "gfs0p25"):
@@ -354,7 +382,8 @@ class App(tk.Tk):
                     )
                 folders = [write_group(g, run_root, met_paths, int(conf["hours"]),
                                        float(conf["internal_model_top_m_agl"]),
-                                       conf["height_ref"], bdyfiles)
+                                       conf["height_ref"], bdyfiles,
+                                        diagnostics=conf["met_diagnostics"])
                            for g in groups]
                 self._notify(f"Prepared {len(folders)} runs in {run_root}")
                 results = execute_groups(Path(conf["executable"]), folders,
@@ -365,9 +394,21 @@ class App(tk.Tk):
                         f"{failures} HYSPLIT runs failed. See per-group MESSAGE/run.log; "
                         "no complete batch CSV was written."
                     )
-                exported = export_run_csv(run_root, height_reference=conf["height_ref"],
-                                          group_folders=folders)
+                exported = export_run_csv(
+                    run_root, height_reference=conf["height_ref"],
+                    group_folders=folders,
+                    selected_diagnostics=conf["met_diagnostics"],
+                )
                 metadata["results_csv"] = exported.path.name
+                metadata["meteorological_output"] = [
+                    {
+                        "setup_flag": option.flag,
+                        "tdump_label": option.tdump_label,
+                        "csv_column": option.csv_column,
+                        "unit": option.unit,
+                    }
+                    for option in selected_variables(conf["met_diagnostics"])
+                ]
                 metadata["results_trajectories"] = exported.trajectories
                 metadata["results_endpoints"] = exported.endpoints
                 metadata["results_missing_terrain_endpoints"] = exported.missing_terrain_endpoints
@@ -418,6 +459,10 @@ class App(tk.Tk):
             "20,000m AGL以上、またはCSV最大高度+1,000m以上を確保します。\n\n"
             "【同時計算プロセス数】\n同時に実行するWindows版HYSPLITの数。"
             "流跡線の総本数ではありません。\n\n"
+            "【出力する気象変数】\n温位・気温・湿度・水蒸気混合比・東西風・南北風・"
+            "混合層高度をチェックで選択します。\n"
+            "気圧・地表標高は常時出力します。\n"
+            "比湿は湿潤空気1kg当たり、水蒸気混合比は乾燥空気1kg当たりのg/kgです。\n\n"
             "【出力】\n一括計算ごとにtrajectories.csvに全軌跡を集約。"
             "標高、AGL高度、推定MSL高度、推定ジオポテンシャル高度を別列で出力。\n\n"
             "【データソース】\n"
