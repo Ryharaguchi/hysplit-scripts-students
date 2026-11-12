@@ -65,7 +65,7 @@ class TestNativeEra5(unittest.TestCase):
 
             def coverage_mock(paths, earliest, latest, used_filedates, **kwargs):
                 self.assertTrue(all(Path(p).is_file() for p in paths))
-                self.assertEqual(Path(used_filedates), filedates)
+                self.assertEqual(Path(used_filedates).resolve(), filedates.resolve())
                 self.assertAlmostEqual(kwargs["max_gap_hours"], 1.01)
                 return CoverageReport(True, ("validated",))
 
