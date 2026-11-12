@@ -1,5 +1,7 @@
 # HYSPLIT Batch Trajectories for Students
 
+**動作対象はWindowsネイティブ環境のみです。WSL・WSL2・Linux・macOSからの実行は禁止しています。**
+
 Windowsで多数の**後方流跡線（backward trajectories）**を計算するための、Python/Tkinter製GUIと気象データ取得ツールです。ラジオゾンデ専用ではなく、地点・高度・開始時刻の格子状設定と観測CSVの両方に対応しています。
 
 **現時点の完成範囲**: NOAA GDAS1/GFS 0.25°のARL取得・途中再開・キャッシュと後方流跡線一括計算、filedatesによる気象時刻検査、tdumpの地図HTML/GeoJSON出力、ERA5/CDS・Google ARCOのデータ取得。**ERA5 CDS→ARLについてはNOAA api2arlを利用した実験的な外部変換経路**を追加しています。Google ARCO NetCDF→ARL変換は未実装です。
@@ -27,7 +29,7 @@ py -3 run_gui.py
 2. 「2. 気象データ」で通常は`GDAS1`を選びます。最初に「計算内容をプレビュー」で本数と必要な気象ファイル数を確認します。
 3. 「一括計算を開始」を押すと、必要なARLファイルを取得し、同じ開始時刻の点をまとめた`CONTROL`/`SETUP.CFG`/`ASCDATA.CFG`を生成して並列計算します。NOAA `filedates`が設定されている場合は実ファイルの日付と時間ギャップを事前検査します（存在しないときは**未検証**とログに明示）。`tdump`、`MESSAGE`、`run.log`と各開始点の`starts.csv`を保存します。
 4. 成功した`tdump`から`map/index.html`と`map/trajectories.geojson`を生成します。「結果を地図で表示」ボタンから既存の実行フォルダも選択できます（オンライン地図にはインターネット接続が必要）。
-4. まず本数を減らした設定で実行を確認し、並列数を段階的に増やしてください。
+5. まず本数を減らした設定で実行を確認し、並列数を段階的に増やしてください。
 
 ### 開始点の指定方法
 
@@ -61,8 +63,8 @@ py -3 -m pip install -r requirements-era5.txt
 
 **外部変換を設定した場合に限り**、「一括計算を開始」でGRIB→ARL→HYSPLITを連携します。手順は次のとおりです。
 
-1. [NOAAのdata2arlソース](https://github.com/noaa-oar-arl/hysplit_data2arl)から**api2arl**を別途コンパイルして用意します。公式の標準配布はUnix/macOS向けです。WindowsではWSL2でビルドしたLinux実行ファイルも使用できます。
-2. GUIの「api2arl実行ファイル」に実行可能ファイルを指定します。WSLの場合は`wsl:/home/user/path/api2arl`のようにLinux側の絶対パスを記述します（`wsl.exe`と`wslpath`が使用でき、データフォルダがWSLから見えることが必要）。
+1. [NOAAのdata2arlソース](https://github.com/noaa-oar-arl/hysplit_data2arl)から**api2arl**を別途コンパイルして用意します。公式の標準配布はUnix/macOS向けです。Windowsネイティブの`api2arl.exe`が必要です。公式ソースがWindowsで容易にビルドできることは未確認であり、準備できない場合はERA5を使った計算を実行できません。
+2. GUIの「api2arl.exe」にWindowsネイティブ実行ファイルの絶対パスを指定します。Linux実行ファイル・WSL経由の変換には対応しません。
 3. GUIの「NOAA filedates 実行ファイル」にWindowsから実行可能な`filedates.exe`を指定します。**変換後の時刻検査が不可能な場合はERA5での自動計算を中止**します。
 4. `pip install -r requirements-era5.txt`でecCodes関連のPython依存を導入し、ERA5 CDSで「一括計算を開始」を押します。
 
@@ -109,7 +111,7 @@ NOAA `filedates`の日時確認は**水平・鉛直範囲、必要気象変数�
 py -3 -m unittest discover -s tests -v
 ```
 
-単体テストはHYSPLIT本体や気象APIなしで実行でき、時刻境界、高度分割、オフセット、気象ファイル名、ダウンロードの安全な再開、ARL時刻検査、tdumpからの地図生成、並列実行（POSIXのモック）を検査します。GitHub ActionsでUbuntu・Windows両方のユニットテストを実行します。**実際のWindows上の`hyts_std.exe`や本物のERA5 API・Google Cloudへの接続試験はまだ実施していません。** 物理的に正しい結果が得られることを保証するものではなく、NOAA HYSPLIT GUIによる同一条件の基準計算との照合が必要です。
+単体テストはHYSPLIT本体や気象APIなしで実行でき、時刻境界、高度分割、オフセット、気象ファイル名、ダウンロードの安全な再開、ARL時刻検査、tdumpからの地図生成、並列実行（POSIXのモック）を検査します。GitHub ActionsではWindows上のみでユニットテストを実行します。**実際のWindows上の`hyts_std.exe`や本物のERA5 API・Google Cloudへの接続試験はまだ実施していません。** 物理的に正しい結果が得られることを保証するものではなく、NOAA HYSPLIT GUIによる同一条件の基準計算との照合が必要です。
 
 ## 公式資料
 

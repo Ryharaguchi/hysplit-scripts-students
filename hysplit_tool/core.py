@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .platform_guard import require_native_windows
+
 UTC = timezone.utc
 EARTH_RADIUS_KM = 6371.0088
 
@@ -248,6 +250,7 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
 
 def execute_groups(executable: Path, folders: list[Path], workers: int = 2,
                    notify: Callable[[str], None] | None = None) -> list[tuple[Path, bool]]:
+    require_native_windows()
     executable = Path(executable).resolve()
     if not executable.is_file():
         raise FileNotFoundError(f"HYSPLIT executable not found: {executable}")

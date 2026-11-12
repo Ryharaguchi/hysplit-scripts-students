@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from .validation import check_coverage
+from .platform_guard import require_native_windows
 
 UTC = timezone.utc
 G0 = 9.80665  # m/s^2; geopotential (m^2/s^2) -> geopotential height (m)
@@ -126,23 +127,14 @@ def convert_grib_to_hourly_grib2(
 
 
 def _converter_command(binary: str, cwd: Path, input_name: str, output_name: str) -> list[str]:
-    """Build native or WSL command without shell interpolation."""
-    if binary.startswith("wsl:"):
-        linux_binary = binary[4:].strip()
-        if not linux_binary.startswith("/"):
-            raise ValueError("WSL converter must be specified as wsl:/absolute/path/to/api2arl")
-        probe = subprocess.run(["wsl.exe", "--exec", "wslpath", "-a", str(cwd.resolve())],
-                               capture_output=True, text=True, errors="replace", timeout=30)
-        if probe.returncode:
-            raise RuntimeError(f"WSL path conversion failed: {probe.stderr.strip()}")
-        linux_dir = probe.stdout.strip().rstrip("/")
-        if not linux_dir.startswith("/"):
-            raise RuntimeError("Invalid WSL working directory")
-        return ["wsl.exe", "--cd", linux_dir, "--exec", linux_binary,
-                "-i" + input_name, "-o" + output_name, "-t50"]
+    """Call a Windows-native api2arl.exe; Linux/WSL converters are unsupported."""
+    if binary.lower().startswith("wsl:"):
+        raise ValueError("WSL converters are prohibited. Specify a native Windows api2arl.exe.")
     native = Path(binary.strip().strip('"')).expanduser().resolve()
+    if native.suffix.lower() != ".exe":
+        raise ValueError("A Windows-native api2arl.exe is required (no WSL/Linux executables).")
     if not native.is_file():
-        raise FileNotFoundError(f"NOAA api2arl executable not found: {native}")
+        raise FileNotFoundError(f"Windows api2arl.exe not found: {native}")
     return [str(native), "-i" + input_name, "-o" + output_name, "-t50"]
 
 
@@ -155,8 +147,9 @@ def convert_cds_to_arl(source_files: list[Path], destination: Path,
     Stores one ARL file per UTC month to avoid HYSPLIT's month-boundary issue.
     Aborts before returning usable files if the converter or filedates fails.
     """
+    require_native_windows()
     if not converter.strip():
-        raise ValueError("Install/compile NOAA api2arl and specify its path first")
+        raise ValueError("Install/compile native Windows api2arl.exe and specify its path first")
     if not Path(filedates).is_file():
         raise FileNotFoundError("NOAA filedates executable required to validate converted ARL")
     destination = Path(destination)
