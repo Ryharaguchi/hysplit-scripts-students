@@ -166,7 +166,7 @@ class TestPlot(unittest.TestCase):
             self.assertNotIn("<script", html)
 
     def test_offline_plot_crosses_dateline_safely(self):
-        from hysplit_tool.offline_plot import offline_html
+        from hysplit_tool.offline_plot import offline_html, _unwrap
         features = [{
             "type": "Feature",
             "properties": {"trajectory": 1, "run": "test", "start_altitude_agl_m": 500},
@@ -175,7 +175,7 @@ class TestPlot(unittest.TestCase):
         }]
         html = offline_html(features, "test", "1 of 1")
         self.assertIn("<path", html)
-        self.assertIn("179.90°E", html)
+        self.assertEqual(_unwrap([179.9, -179.9], 179.9), [179.9, 180.1])
         self.assertNotIn("tile.openstreetmap", html)
         self.assertNotIn("unpkg.com", html)
 
