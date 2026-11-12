@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import threading
@@ -14,22 +15,21 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
-from .core import (execute_groups, expand_starts, fixed_starts, group_starts,
-                   load_starts_csv, parse_heights, parse_time_offsets,
-                   parse_utc, parse_xy_offsets, write_group)
+from .core import (JST, execute_groups, expand_observations, group_starts,
+                   load_starts_csv, write_group)
 from .era5 import download_cds, download_google_arco
-from .era5_convert import convert_cds_to_arl
+from .native_era5 import convert_cds_grib1_to_arl
 from .plot import create_map
 from .platform_guard import require_native_windows
 from .validation import check_coverage
 from .meteo import download_noaa, local_arl_files, plan_archives
 
 PROVIDERS = {
-    "GDAS1 | NOAA 全球1°・ARL（推奨）": "gdas1",
-    "GFS 0.25° | NOAA 全球・ARL（大容量）": "gfs0p25",
-    "手元のARLファイルを使用": "local",
-    "ERA5 | Copernicus CDS（外部api2arlで変換・実行）": "era5_cds",
-    "ERA5 | Google ARCO（取得のみ・NetCDF）": "arco_era5",
+    "GDAS1": "gdas1",
+    "GFS 0.25°": "gfs0p25",
+    "ローカルARL": "local",
+    "ERA5 (CDS)": "era5_cds",
+    "ERA5 (Google ARCO)": "arco_era5",
 }
 UTC = timezone.utc
 
@@ -53,20 +53,14 @@ class App(tk.Tk):
         self.events = queue.Queue()
         self.busy = False
         self.last_run = None
-        default_time = (datetime.now(UTC) - timedelta(days=14)).strftime("%Y-%m-%d 00:00")
         detected_executable = discover_native_hysplit()
         work_root = Path(r"D:\Codex") / "hysplit-batch" if Path(r"D:\Codex").is_dir() else Path.home() / "HYSPLIT-batch"
         defaults = {
-            "executable": str(detected_executable),
-            "root": str(work_root),
-            "mode": "manual", "csv": "",
-            "start": default_time, "end": default_time, "interval": "6",
-            "lat": "35.0", "lon": "135.0", "heights": "500:1000:100",
-            "xy": "0,0", "dt": "0",
+            "executable": str(detected_executable), "root": str(work_root),
+            "csv": "", "distance_km": "0", "time_shift_minutes": "0",
             "hours": "48", "top": "20000", "height_ref": "MSL",
             "workers": "2", "max_points": "100",
             "provider": next(iter(PROVIDERS)), "local_met": "", "bbox": "",
-            "api2arl": "", "filedates": str(detected_executable.parent / "filedates.exe"),
             "map_limit": "500",
         }
         self.v = {key: tk.StringVar(value=value) for key, value in defaults.items()}
@@ -110,29 +104,28 @@ class App(tk.Tk):
         self._entry(loc, "HYSPLIT実行ファイル (.exe)", "executable", 0, 65, self._pick_executable)
         self._entry(loc, "作業・データ保存フォルダ", "root", 1, 65, self._pick_root)
 
-        bases = self._group(setup_content, "開始点（UTC、緯度・経度、標高）")
-        modes = ttk.Frame(bases)
-        modes.grid(row=0, column=0, columnspan=3, sticky="w", pady=3)
-        ttk.Radiobutton(modes, text="固定地点 × 高度 × 時刻", variable=self.v["mode"], value="manual").pack(side="left", padx=4)
-        ttk.Radiobutton(modes, text="観測CSV（地点ごとに位置・時刻・高度）", variable=self.v["mode"], value="csv").pack(side="left", padx=4)
-        self._entry(bases, "観測CSV (任意)", "csv", 1, 65, self._pick_csv)
-        self._entry(bases, "開始UTC (固定地点のみ)", "start", 2)
-        self._entry(bases, "終了UTC (固定地点のみ)", "end", 3)
-        self._entry(bases, "時刻間隔 [h] (固定地点のみ)", "interval", 4)
-        self._entry(bases, "緯度 [°N] (固定地点のみ)", "lat", 5)
-        self._entry(bases, "経度 [°E] (固定地点のみ)", "lon", 6)
-        self._entry(bases, "高度[m] (固定地点のみ;例 500:1000:100)", "heights", 7)
+        bases = self._group(setup_content, "観測CSV（JST）")
+        self._entry(bases, "CSV（時刻, 緯度, 経度, 高度m）", "csv", 0, 65, self._pick_csv)
+        ttk.Label(bases, text="ヘッダーあり・なし両対応。例: 2026/10/10 09:00,35,135,500",
+                  foreground="#495b6c").grid(
+                      row=1, column=0, columnspan=3, sticky="w", padx=5)
 
-        settings = self._group(setup_content, "感度解析・実行設定")
-        self._entry(settings, "水平ずらし (東km,北km;...)", "xy", 0, 60)
-        self._entry(settings, "開始時刻ずらし [h] (例 -1,0,1)", "dt", 1)
-        self._entry(settings, "後方計算時間 [h]", "hours", 2)
-        self._entry(settings, "モデル上端 [m]", "top", 3)
-        ttk.Label(settings, text="入力高度の基準").grid(row=4, column=0, sticky="w", padx=5, pady=4)
-        ttk.Combobox(settings, textvariable=self.v["height_ref"], values=["AGL", "MSL"],
-                     state="readonly", width=10).grid(row=4, column=1, sticky="w", padx=5)
-        self._entry(settings, "並列実行数 (1～32)", "workers", 5)
-        self._entry(settings, "1実行当たり最大開始点数", "max_points", 6)
+        settings = self._group(setup_content, "観測時刻・位置の感度解析")
+        self._entry(settings, "水平ずらし距離 [km] (0=なし)", "distance_km", 0)
+        self._entry(settings, "観測時刻の前後に試す [分] (0=なし)", "time_shift_minutes", 1)
+        ttk.Label(settings, text="距離を入れると中心＋北・北東・東・南東・南・南西・西・北西の9地点。").grid(
+            row=2, column=0, columnspan=3, sticky="w", padx=5)
+        ttk.Label(settings, text="時間を入れると観測時刻の前・同時刻・後の3通り。").grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=5)
+
+        run_settings = self._group(setup_content, "後方流跡線の計算条件")
+        self._entry(run_settings, "何時間前まで遡るか [h]", "hours", 0)
+        self._entry(run_settings, "モデル上端 [m]", "top", 1)
+        ttk.Label(run_settings, text="CSVの高度の基準").grid(row=2, column=0, sticky="w", padx=5)
+        ttk.Combobox(run_settings, textvariable=self.v["height_ref"], values=["AGL", "MSL"],
+                     state="readonly", width=10).grid(row=2, column=1, sticky="w", padx=5)
+        self._entry(run_settings, "並列実行数 (1～32)", "workers", 3)
+        self._entry(run_settings, "1実行当たり最大開始点数", "max_points", 4)
 
         source = self._group(meteo, "データソースの選択")
         ttk.Label(source, text="気象データ").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -140,20 +133,18 @@ class App(tk.Tk):
                      state="readonly", width=59).grid(row=0, column=1, sticky="ew", padx=5)
         self._entry(source, "ローカルARLファイル (複数選択可)", "local_met", 1, 55, self._pick_arl)
         self._entry(source, "ERA5の領域 N,W,S,E (空欄は自動)", "bbox", 2, 45)
-        self._entry(source, "api2arl.exe (Windowsネイティブ実行ファイル)", "api2arl", 4, 65)
-        self._entry(source, "NOAA filedates 実行ファイル", "filedates", 5, 65, self._pick_filedates)
-        self._entry(source, "地図表示の最大流跡線数", "map_limit", 6)
+        self._entry(source, "地図表示の最大流跡線数", "map_limit", 4)
         ttk.Label(source, text="ERA5の領域は開始点周辺の推定値です。後方経路を必ず含むとは限りません。",
                   foreground="#855000").grid(row=3, column=0, columnspan=3, sticky="w", padx=5)
 
         notes = self._group(meteo, "対応状況と重要事項")
         for line in [
-            "NOAA GDAS1（全球1°）: ARLを自動取得して実行可能。週ファイルは約0.6GB。",
-            "NOAA GFS 0.25°（全球）: ARLを自動取得して実行可能。日ファイル約3GB以上。",
-            "ローカルARL: すでに保存済みのARLを使用。ERA5をARL化済みの場合もこちらを選択。",
-            "ERA5 CDS: ecCodesと外部api2arlがあればGRIB→ARLに変換。filedatesによる時刻検証必須。",
-            "Google ARCO ERA5: Google Cloud公開ZarrからNetCDFを抽出。ARL変換は未実装。",
-            "ERA5は変数・座標変換を伴います。変換後もNOAA基準計算との照合が必要です。",
+            "GDAS1: NOAAのARLデータを取得してWindowsで計算します。",
+            "GFS 0.25°: NOAAのARLデータを取得してWindowsで計算します。",
+            "ローカルARL: 手元のARLファイルで計算します。",
+            "ERA5 (CDS): GRIB1をWindowsのgrib2arl.exeでARL変換します（実験的）。",
+            "ERA5 (Google ARCO): NetCDFの取得まで。ARL変換は未対応です。",
+            "grib2arl.exeとfiledates.exeはHYSPLITの実行フォルダから自動検出します。",
             "地図: OpenStreetMapは使用しません。オフラインの緯度経度図とGeoJSONを出力します。",
             "取得には大量のディスク容量・通信量が必要です。観測期間+後方計算期間を対象にします。",
         ]:
@@ -178,17 +169,12 @@ class App(tk.Tk):
         scrollbar = ttk.Scrollbar(frame, command=self.log.yview)
         scrollbar.pack(side="right", fill="y")
         self.log.configure(yscrollcommand=scrollbar.set)
-        self._log("UTCで入力してください。初めに『計算内容をプレビュー』で計算数と気象データを確認してください。")
+        self._log("観測CSVの時刻はJSTとして読み取ります。内部でUTCへ変換します。")
 
     def _pick_executable(self):
         value = filedialog.askopenfilename(title="hyts_std.exe", filetypes=[("EXE", "*.exe"), ("All files", "*.*")])
         if value:
             self.v["executable"].set(value)
-
-    def _pick_filedates(self):
-        value = filedialog.askopenfilename(title="NOAA filedates", filetypes=[("Executable", "*.exe"), ("All files", "*.*")])
-        if value:
-            self.v["filedates"].set(value)
 
     def _pick_root(self):
         value = filedialog.askdirectory(title="HYSPLIT作業フォルダ")
@@ -199,13 +185,12 @@ class App(tk.Tk):
         value = filedialog.askopenfilename(title="開始点CSV", filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
         if value:
             self.v["csv"].set(value)
-            self.v["mode"].set("csv")
 
     def _pick_arl(self):
         values = filedialog.askopenfilenames(title="ARLファイルを複数選択")
         if values:
             self.v["local_met"].set(";".join(values))
-            self.v["provider"].set("手元のARLファイルを使用")
+            self.v["provider"].set("ローカルARL")
 
     def _log(self, line):
         self.log.configure(state="normal")
@@ -216,13 +201,9 @@ class App(tk.Tk):
     def _data(self):
         """Collect and validate everything in the GUI thread before a worker starts."""
         conf = {k: var.get().strip() for k, var in self.v.items()}
-        if conf["mode"] == "csv":
-            bases = load_starts_csv(Path(conf["csv"]))
-        else:
-            bases = fixed_starts(parse_utc(conf["start"]), parse_utc(conf["end"]),
-                                 float(conf["interval"]), float(conf["lat"]),
-                                 float(conf["lon"]), parse_heights(conf["heights"]))
-        points = expand_starts(bases, parse_xy_offsets(conf["xy"]), parse_time_offsets(conf["dt"]))
+        bases = load_starts_csv(Path(conf["csv"]))
+        points = expand_observations(
+            bases, float(conf["distance_km"]), float(conf["time_shift_minutes"]))
         groups = group_starts(points, max_points=int(conf["max_points"]))
         back_hours = int(conf["hours"])
         top = float(conf["top"])
@@ -254,8 +235,10 @@ class App(tk.Tk):
     def preview(self):
         try:
             conf, points, groups, earliest, latest, provider, bbox = self._data()
-            self._log(f"プレビュー: {len(points):,} 本 / {len(groups):,} HYSPLIT実行 / "
-                      f"対象UTC {earliest:%Y-%m-%d %H:%M} ～ {latest:%Y-%m-%d %H:%M}")
+            self._log(f"プレビュー: CSV {len(load_starts_csv(Path(conf['csv']))):,}行 → "
+                      f"{len(points):,}本 / {len(groups):,}回実行")
+            self._log(f"必要気象期間(JST): {earliest.astimezone(JST):%Y-%m-%d %H:%M} ～ "
+                      f"{latest.astimezone(JST):%Y-%m-%d %H:%M}")
             if provider in ("gdas1", "gfs0p25"):
                 plan = plan_archives(provider, earliest, latest)
                 self._log(f"NOAA {provider}: {len(plan)} ファイル取得・キャッシュ利用予定: " +
@@ -263,7 +246,7 @@ class App(tk.Tk):
                 if provider == "gfs0p25":
                     self._log("注意: GFS 0.25° は1日あたり約3GB以上（保存領域・帯域を確認）。")
             elif provider == "era5_cds":
-                self._log(f"ERA5 CDS: bbox={bbox}. 外部api2arl・filedates設定時は変換して実行できます。")
+                self._log(f"ERA5(CDS): bbox={bbox}。GRIB1をWindowsのgrib2arl.exeで変換します。")
             elif provider == "arco_era5":
                 self._log(f"Google ARCO: NetCDFの取得のみ / ARL自動変換未対応 / bbox={bbox}")
             else:
@@ -278,11 +261,12 @@ class App(tk.Tk):
             data = self._data()
             if action == "run" and data[5] == "arco_era5":
                 raise ValueError("Google ARCOのNetCDF→ARL変換は未対応です。CDSまたはNOAAを選択してください。")
-            if action == "run" and data[5] == "era5_cds":
-                if not data[0]["api2arl"]:
-                    raise ValueError("ERA5実行にはNOAA api2arlのパスが必要です。")
-                if not Path(data[0]["filedates"]).is_file():
-                    raise ValueError("ERA5実行にはNOAA filedatesによる変換結果の時刻検証が必要です。")
+            if data[5] == "era5_cds":
+                exec_dir = Path(data[0]["executable"]).resolve().parent
+                missing = [name for name in ("grib2arl.exe", "filedates.exe")
+                           if not (exec_dir / name).is_file()]
+                if missing:
+                    raise FileNotFoundError("ERA5変換に必要なWindowsツールがありません: " + ", ".join(missing))
             if action == "run":
                 executable = Path(data[0]["executable"]).resolve()
                 if not executable.is_file():
@@ -314,15 +298,11 @@ class App(tk.Tk):
                 self._notify(f"Local ARL: {len(met_paths)} files selected")
             elif provider == "era5_cds":
                 results = download_cds(earliest, latest, met_dir, bbox, notify=self._notify)
-                self._notify(f"ERA5 GRIB downloaded ({len(results)} files).")
-                if action == "run":
-                    met_paths = convert_cds_to_arl(
-                        results, met_dir / "arl", earliest, latest,
-                        converter=conf["api2arl"], filedates=Path(conf["filedates"]),
-                        notify=self._notify)
-                else:
-                    self._notify("ERA5 GRIB ready. api2arl conversion is run only when starting HYSPLIT.")
-                    met_paths = []
+                self._notify(f"ERA5 GRIB downloaded: {len(results)} files")
+                met_paths = convert_cds_grib1_to_arl(
+                    results, met_dir / "arl", earliest, latest,
+                    hysplit_executable=Path(conf["executable"]), notify=self._notify)
+                self._notify(f"ERA5 ARL conversion complete: {len(met_paths)} files")
             elif provider == "arco_era5":
                 result = download_google_arco(earliest, latest, met_dir, bbox, notify=self._notify)
                 self._notify(f"ARCO ERA5 saved: {result}. NetCDF is NOT HYSPLIT ARL input.")
@@ -330,7 +310,8 @@ class App(tk.Tk):
             else:
                 raise ValueError(f"Unsupported meteo source: {provider}")
             if action == "run":
-                coverage = check_coverage(met_paths, earliest, latest, Path(conf["filedates"]))
+                filedates = Path(conf["executable"]).resolve().parent / "filedates.exe"
+                coverage = check_coverage(met_paths, earliest, latest, filedates)
                 for message in coverage.messages:
                     self._notify("Meteorology: " + message)
                 if provider == "era5_cds" and not coverage.verified:
@@ -338,7 +319,12 @@ class App(tk.Tk):
                 run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:6]
                 run_root = root / "runs" / run_id
                 run_root.mkdir(parents=True, exist_ok=False)
+                # Keep the exact source observation CSV for scientific provenance.
+                observation_bytes = Path(conf["csv"]).read_bytes()
+                (run_root / "observations.csv").write_bytes(observation_bytes)
                 metadata = {"settings": conf, "meteorology": [str(p) for p in met_paths],
+                            "observation_csv_copy": "observations.csv",
+                            "observation_csv_sha256": hashlib.sha256(observation_bytes).hexdigest(),
                             "start_count": len(points), "execution_count": len(groups),
                             "utc_bounds": [earliest.isoformat(), latest.isoformat()],
                             "arl_times_verified": coverage.verified,
@@ -380,19 +366,22 @@ class App(tk.Tk):
     def show_help(self):
         messagebox.showinfo(
             "入力の説明",
-            "【観測CSV】\n"
-            "time_utc,latitude,longitude,height_m の4列。時刻はUTC、緯度経度は符号付き十進度、高度はm。\n"
-            "CSVモードでは開始日時・時刻間隔・緯度経度・高度の各入力欄は使いません。\n\n"
-            "【時刻間隔】\n固定地点モードで、開始UTCから終了UTCまで何時間おきに始めるか。\n"
-            "例: 00:00～06:00を2h間隔 → 00,02,04,06時の4時刻。\n\n"
-            "【高度】\n500:1000:100 → 500,600,700,800,900,1000m の6高度。固定地点モードのみ。\n\n"
-            "【水平ずらし】\n東km,北km。0,0は移動なし。5,0は東5km。0,-5は南5km。\n"
-            "複数: 0,0;5,0;-5,0;0,5;0,-5\n\n"
-            "【開始時刻ずらし】\n0はそのまま。-1,0,1は各開始点を前1h、同時刻、後1hで3倍にします。\n\n"
-            "【データソース】\nGDAS/GFSはNOAAのARLをダウンロードして計算。\n"
-            "ローカルARLは既存のARLファイルで計算。ERA5 CDSは取得・外部変換が必要で試験的。\n"
-            "Google ARCO ERA5は現状取得のみで計算不可。\n\n"
-            "【地図】\nネット接続不要の緯度経度図です。地形・海岸線はありません。"
+            "【観測CSV（JST）】\n"
+            "時刻, 緯度, 経度, 高度m の4列。ヘッダーあり・なし両対応。\n"
+            "例: 2026/10/10 09:00,35,135,500\n"
+            "タイムゾーン無指定は日本時間、明示的な+09:00・Zはその指定を優先。\n\n"
+            "秒は最も近い分に丸めます（30秒以上は切り上げ）。\n\n"
+            "【水平ずらし】\n"
+            "0kmは観測位置のみ。5kmは中心・上下左右・斜めの9地点。\n"
+            "斜めも中心から5kmです。\n\n"
+            "【観測時刻の前後】\n"
+            "0分は観測時刻のみ。30分は前30分・観測時刻・後30分の3通り。\n\n"
+            "【後方計算時間】\nCSVに記載された各時刻から何時間過去へ遡るか。\n\n"
+            "【データソース】\n"
+            "GDAS1/GFS: NOAA ARLを自動取得しWindows上で計算。\n"
+            "ローカルARL: 保存済みARLを使用。\n"
+            "ERA5(CDS): GRIB1をWindowsのgrib2arl.exeで変換して計算（試験的）。\n"
+            "ERA5(Google ARCO): NetCDF取得のみ。ARL自動変換は未対応。"
         )
 
     def plot_results(self):

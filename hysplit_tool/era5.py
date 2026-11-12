@@ -1,4 +1,4 @@
-"""Optional ERA5 acquisition adapters. Outputs are NOT directly HYSPLIT-compatible.
+"""ERA5 acquisition adapters: CDS GRIB for native GRIB1 conversion, ARCO for NetCDF.
 
 CDS supplies GRIB, Google ARCO supplies Zarr read into NetCDF. Before running
 HYSPLIT an independent conversion into ARL (and verification) is required.
@@ -15,13 +15,12 @@ from typing import Callable
 ARCO_URL = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 PRESSURE_FIELDS = ["geopotential", "temperature", "u_component_of_wind",
                    "v_component_of_wind", "vertical_velocity", "relative_humidity"]
-PRESSURE_LEVELS = ["1000", "975", "950", "925", "900", "875", "850", "825",
-                   "800", "775", "750", "700", "650", "600", "550", "500",
-                   "450", "400", "350", "300", "250", "225", "200", "175",
-                   "150", "125", "100", "70", "50"]
-SURFACE_FIELDS = ["surface_pressure", "2m_temperature", "10m_u_component_of_wind",
-                  "10m_v_component_of_wind"]
-
+# Twelve pressure levels, matching the tested Windows grib2arl -k13 setup.
+PRESSURE_LEVELS = ["1000", "925", "850", "700", "600", "500",
+                   "400", "300", "250", "200", "150", "100"]
+SURFACE_FIELDS = ["2m_temperature", "10m_u_component_of_wind",
+                  "10m_v_component_of_wind", "surface_pressure",
+                  "total_precipitation", "boundary_layer_height", "geopotential"]
 
 def region_around(lat: float, lon: float, lat_radius: float = 25, lon_radius: float = 35):
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
@@ -74,6 +73,7 @@ def download_cds(earliest: datetime, latest: datetime, target_dir: Path,
                 "data_format": "grib",
                 "download_format": "unarchived",
                 "area": list(bbox),  # north, west, south, east
+                "grid": [0.25, 0.25],
             }
             if variant == "pressure":
                 request["pressure_level"] = PRESSURE_LEVELS

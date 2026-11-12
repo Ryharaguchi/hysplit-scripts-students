@@ -1,163 +1,110 @@
-# HYSPLIT Batch Trajectories for Students
+# HYSPLIT 後方流跡線一括計算（Windows）
 
-**動作対象はWindowsネイティブ環境のみです。WSL・WSL2・Linux・macOSからの実行は禁止しています。**
-
-Windowsで多数の**後方流跡線（backward trajectories）**を計算するための、Python/Tkinter製GUIと気象データ取得ツールです。ラジオゾンデ専用ではなく、地点・高度・開始時刻の格子状設定と観測CSVの両方に対応しています。
-
-**現時点の完成範囲**: NOAA GDAS1/GFS 0.25°のARL取得・途中再開・キャッシュと後方流跡線一括計算、filedatesによる気象時刻検査、tdumpの地図HTML/GeoJSON出力、ERA5/CDS・Google ARCOのデータ取得。**ERA5 CDS→ARLについてはNOAA api2arlを利用した実験的な外部変換経路**を追加しています。Google ARCO NetCDF→ARL変換は未実装です。
-
-**重要**: 取得・変換コードの単体テストは実施していますが、ERA5実GRIB→ARL→HYSPLITの物理検証は未実施です。研究結果に使う前に、NOAAの検査ツールとHYSPLIT標準GUIによる基準計算との照合が必要です。
-
-## 必要環境
-
-- Windows 10/11、Python 3.10以降（GUIは標準の`tkinter`、NOAA取得には追加Python依存なし）
-- インストール済みの[NOAA HYSPLIT Windows版](https://www.arl.noaa.gov/hysplit/getrun-hysplit/)と`hyts_std.exe`および`bdyfiles`フォルダ
-- 気象データ保存用ストレージ：GDAS1は週当たり約0.6 GB、GFS 0.25°は日当たり約3 GB以上。長期間では大容量になります
-- ERA5 CDS: 別途Copernicus Climate Data Store利用登録、対象データの利用規約への同意、`~/.cdsapirc`設定、およびオプションのPython依存
-- Google ARCO ERA5: オプションのPython依存、公開Google Cloudのデータへアクセスできる通信環境。ネットワーク転送料等の条件を事前に確認してください
+**Windowsネイティブ専用。WSL/WSL2・Linux・macOSは実行対象外です。**
+計算者が作成した観測CSVから、各行の時刻・緯度・経度・高度を開始条件として、HYSPLITの後方流跡線を大量に計算するTkinter GUIです。NOAA READYのWeb上で数値計算を実行するものではありません。
 
 ## 起動
 
-Windowsで、リポジトリをダウンロード/クローンした後、PowerShellで：
+Windows PowerShellから：
 
 ```powershell
-cd hysplit-scripts-students
+cd D:\Codex\hysplit-scripts-students
 py -3 run_gui.py
 ```
 
-1. 「1. 後方流跡線の設定」でHYSPLITの実行ファイル・保存先・地点・日時（**UTC**）・高度・位置/時間のずらし量を入力します。緯度は北緯正、経度は東経正、水平ずらしは東km・北kmです。
-2. 「2. 気象データ」で通常は`GDAS1`を選びます。最初に「計算内容をプレビュー」で本数と必要な気象ファイル数を確認します。
-3. 「一括計算を開始」を押すと、必要なARLファイルを取得し、同じ開始時刻の点をまとめた`CONTROL`/`SETUP.CFG`/`ASCDATA.CFG`を生成して並列計算します。NOAA `filedates`が設定されている場合は実ファイルの日付と時間ギャップを事前検査します（存在しないときは**未検証**とログに明示）。`tdump`、`MESSAGE`、`run.log`と各開始点の`starts.csv`を保存します。
-4. 成功した`tdump`から`map/index.html`（**外部通信なしのオフラインSVG図**）と`map/trajectories.geojson`を生成します。「結果を地図で表示」ボタンから既存の実行フォルダも選択できます。HTML図には海岸線・地形図はありません。
-5. まず本数を減らした設定で実行を確認し、並列数を段階的に増やしてください。
+NOAA HYSPLIT Windows版の`hyts_std.exe`が必要です。既存の`Desktop\backwardtrajectory\HYSPLIT\exec`を自動検出します。作業フォルダの初期値は`D:\Codex\hysplit-batch`です。元のHYSPLITフォルダ、既存の観測データ・出力データは書き換えません。
 
-### 入力欄の早見表
+## 観測CSV（JST）
 
-| 入力欄 | 固定地点モード | 観測CSVモード |
+CSVは**列の名前でなく順序で読み込み**ます。必須の4列は次の順です。
+
+| 列 | 内容 | 入力例 |
 |---|---|---|
-| 開始UTC・終了UTC | 使用する | 使用しない |
-| 時刻間隔[h] | 開始UTC～終了UTCを何時間おきに生成するか | 使用しない（CSV内のtime_utcを使用） |
-| 緯度・経度 | 使用する | 使用しない（CSV列を使用） |
-| 高度[m] | `500:1000:100`なら500,600,700,800,900,1000 mの6点 | 使用しない（CSV列を使用） |
-| 水平ずらし | 使用する | 使用する |
-| 開始時刻ずらし | 使用する | 使用する |
-| 後方計算時間[h] | 各開始点から何時間遡るか | 同左 |
+| 1 | 観測日時（通常JST） | `2026/10/10 09:00` |
+| 2 | 緯度（度、北＋） | `35.00` |
+| 3 | 経度（度、東＋） | `135.00` |
+| 4 | 高度（m） | `500` |
 
-`水平ずらし`は **東km,北km** の順番です。
-`0,0`は移動なし、`5,0`は東5 km、`0,-5`は南5 km。
-複数の移動候補は `0,0;5,0;-5,0;0,5;0,-5` のようにセミコロンで区切ります。
-`開始時刻ずらし`は時間単位で、`-1,0,1` は各開始時刻の1時間前、同時刻、1時間後を生成します。
+ヘッダーは**あってもなくても可**。ヘッダーの文字列は自由で、2～4列が数字でない行を先頭ヘッダーとして自動判定します。日本語のExcel CSV（CP932/Shift-JIS）とUTF-8（BOM付き含む）を読み込めます。
 
-例: 観測CSVが6行で水平ずらし5地点、開始時刻ずらし3種類なら **6×5×3=90本** の流跡線を生成します。位置・時刻オフセットはCSV内の各行にも適用されます。
+`samples/starts.csv`（ヘッダーあり）：
 
-初期設定では意図しない大量計算を避けるため、水平ずらし`0,0`、開始時刻ずらし`0`としています。任意のずらしを追加してください。
+```csv
+時刻,緯度,経度,高度
+2026/10/10 09:00,35,135,500
+2026/10/10 09:01,35.01,135.02,600
+```
 
-### 開始点の指定方法
+`samples/starts_no_header.csv`（ヘッダーなし）：
 
-**固定地点**: `開始UTC`、`終了UTC`（同一でもよい）、`時刻間隔[h]`、`緯度・経度`、`高度 [m]`を入力。`500:10000:100`は500～10,000 mを100 m刻み、**96高度**です。`500,1500,3000`のような任意値も可能。
+```csv
+2026/10/10 09:00,35,135,500
+2026-10-10 09:01,35.01,135.02,600
+```
 
-**観測CSV**: `samples/starts.csv`を参照してください。必須列は`time_utc,latitude,longitude,height_m`です。1行が1つの計算開始点となり、高度ごとに異なる位置と時刻を使えます。時刻のタイムゾーン指定がない場合も**UTCとして扱います**（ローカル時刻の自動変換はしません）。`YYYY-MM-DD HH:MM`およびISO 8601のUTC日時を受け付けます。開始分にも対応しています。
+日時は次の記法を認識します：`YYYY/MM/DD HH:MM`、`YYYY/MM/DD HH:MM:SS`、`YYYY-MM-DD HH:MM[:SS]`、`YYYY.MM.DD HH:MM`、`YYYYMMDDHHMM`、`YYYYMMDDHHMMSS`、ISO 8601（`T`、`Z`、`+09:00`等）。タイムゾーンが省略されると**JST (UTC+09:00)** と解釈します。明示的なタイムゾーンがあればその指定を使います。`JST`/`UTC`末尾表記も使えます。
 
-どちらの方式も`水平ずらし`、`開始時刻ずらし`を乗算して計算ケースを増やせます。例えば`0,0;5,0;-5,0;0,5;0,-5`と`-1,0,1`を指定すると各元の開始点について15本です。計算本数上限は10万本、`CONTROL`当たりの開始点数上限はGUIで変更できます（初期値100）。同一時刻の点のみ1実行にまとめ、複数時刻では独立した実行を行います。
+HYSPLITの開始時刻は分単位なので、CSVに秒が含まれる場合は**30秒未満を切り捨て、30秒以上を次の分に切り上げ**ます。計算で使用する値は内部の`CONTROL`にUTCで記録し、元のCSVも計算フォルダに保存します。
 
-**高度基準**: `AGL`（地上高）/`MSL`（海抜高度）を明示。`SETUP.CFG`の`KMSL`を適切に設定します。ラジオゾンデのGNSS楕円体高を使用するときは海抜高度への変換が必要です。HYSPLITの出力高度は標準でAGLです。
+## 位置・時刻の感度解析
 
-## データソースの選び方
+GUIの「水平ずらし距離 [km]」は距離1つだけを指定します。
 
-**新しいGDAS/GFSデータで計算する場合**は「GDAS1」または「GFS 0.25°」を選択します。気象データはNOAAのアーカイブからローカルへダウンロードされ、**モデルの実行はWindowsローカル**で行います。これはNOAA READYのWeb上で計算する方式ではありません。
+- `0`：観測位置の1地点だけ
+- `5`：観測位置＋北・北東・東・南東・南・南西・西・北西にそれぞれ5 km離れた計9地点
 
-**すでにARL形式のファイルが手元にある場合**は「手元のARLファイルを使用」を選び、ファイルパスを指定します。ERA5から変換済みの`DATA.ARL`もこれに該当します。
+**斜めも中心から5 km**です。8方向は北を0°として45°刻みの方位角で、球面大円計算から求めます。高度は変えません。
 
-**ERA5 CDS**はGRIBをダウンロードし、別途用意したWindowsネイティブの`api2arl.exe`と`filedates.exe`で変換する実験的な経路です。実データでの自動変換の検証は未完了です。**Google ARCO ERA5**はNetCDFへの切り出しのみで、そのままHYSPLITに入力して計算することはできません。
+GUIの「観測時刻の前後に試す [分]」は、各CSV行の観測時刻からの差を指定します。
 
-## 気象データの対応状況
+- `0`：観測時刻のみ
+- `30`：観測時刻の30分前・観測時刻・30分後の3時刻
 
-| 選択 | 入手元 | 形式 | ワンクリック計算 | 備考 |
-|---|---|---|---|---|
-| GDAS1 | NOAA READYアーカイブ | ARL | **対応** | 全球1°、週ファイル、初期推奨 |
-| GFS 0.25° | NOAA READYアーカイブ | ARL | **対応** | 全球、日ファイル、大容量 |
-| Local ARL | 利用者が指定するファイル | ARL | **対応** | データの形式・期間は別途利用者が確認 |
-| ERA5 CDS | Copernicus CDS API | GRIB | **条件付き実験対応** | ecCodes、外部api2arl、filedatesが必要 |
-| Google ARCO ERA5 | Google Cloud公開Zarr | NetCDFに切り出し | **未対応（取得のみ）** | 高層データ含む。ARL変換が必要 |
+「開始UTC」「終了UTC」「時刻間隔」はありません。**CSVの各行が計算の開始時刻**です。「何時間前まで遡るか [h]」は、例えば`48`なら各開始時刻から過去48時間を計算する設定です。
 
-データ取得は「開始時刻の最小値−後方計算時間」から「開始時刻の最大値」までを基準に計画します。GDAS/GFSでは境界を含むように気象ファイルを追加して取得します。既存ファイルはサイズが0でない限り再取得せず、ダウンロード中は`.part`に保存します。サーバーがETagまたはLast-ModifiedとHTTP Rangeに対応しているときは中断位置から再開し、対応しない場合は先頭から安全に再取得します。HTTPのContent-Length等で転送サイズを照合しますが、**暗号学的チェックサムによる完全性検証ではありません**。**ファイル名からの期間推定はデータ本体の有効時間・欠損・鉛直変数の検証ではありません。** `MESSAGE`と`run.log`を確認してください。
+CSVが6行、水平距離5 km、時刻差30分なら、`6×9×3=162`本の流跡線を計算します。同じ開始時刻の流跡線は可能な範囲で1回のHYSPLIT実行にまとめます。
 
-### ERA5 CDSを使うとき
+## 高度
+
+CSVの高度欄をそのまま初期高度に使用します。500～1000 mを100 m間隔で計算する場合は、CSVに500, 600, 700, 800, 900, 1000 mの**6行を作成**してください（位置・時刻は行ごとに独立）。GUIでは高度範囲の入力欄を使用しません。
+
+高度基準は`AGL`（地上高）または`MSL`（平均海面基準の高度）を明示してください。GNSS楕円体高を使用する場合は、必要な基準変換を事前に行ってください。モデルの格子と鉛直解像度は、開始高度の100 m刻みとは異なります。
+
+## 気象データの選択
+
+| データソース | 取得 | WindowsでのARL変換 | HYSPLIT実行 |
+|---|---|---|---|
+| GDAS1 | NOAA ARLを取得 | 不要 | 対応 |
+| GFS 0.25° | NOAA ARLを取得 | 不要 | 対応 |
+| ローカルARL | 既存のARLファイルを指定 | 不要 | 対応 |
+| ERA5 (CDS) | CDSからGRIBを取得 | **GRIB1に限り、Windows同梱のgrib2arl.exeで変換（実験的）** | 変換・時間検証成功時のみ |
+| ERA5 (Google ARCO) | Google CloudからNetCDFを取得 | **未実装** | 未対応 |
+
+**`api2arl`、`filedates.exe`をGUIから選ばせません。** HYSPLITの`hyts_std.exe`が入っている`exec`フォルダから、GRIB1変換用の`grib2arl.exe`とARL時間検査用の`filedates.exe`を自動検出します。
+
+ERA5 (CDS)ではCopernicus CDSへの登録・利用規約の同意・API設定（`~/.cdsapirc`）とPythonの`cdsapi`が必要です。
 
 ```powershell
 py -3 -m pip install -r requirements-era5.txt
 ```
 
-[Copernicus CDS](https://cds.climate.copernicus.eu/)に登録し、APIアクセスの設定を行ってください。GUIの`ERA5 CDS`を選び「気象データを取得」を押すと、指定期間の高層6変数・複数気圧面と地表変数をGRIB形式で保存します。
+CDS用の`cdsapi`だけを導入する場合は`py -3 -m pip install cdsapi`でも構いません。取得形式がGRIB2の場合は、GRIB1用の`grib2arl.exe`へ渡さず明示的に停止します。変換中にデータが不足する、時間を検査できない場合もモデル実行を停止します。
 
-**外部変換を設定した場合に限り**、「一括計算を開始」でGRIB→ARL→HYSPLITを連携します。手順は次のとおりです。
+ERA5 CDSのGRIB1自動変換は**既存のWindows版変換ツールに基づく実験的機能**です。全てのCDSのGRIBで動作する保証はありません。変換後の気象場の妥当性を、元のERA5変数・HYSPLIT`MESSAGE`・別条件の基準計算と照合してください。
 
-1. [NOAAのdata2arlソース](https://github.com/noaa-oar-arl/hysplit_data2arl)から**api2arl**を別途コンパイルして用意します。公式の標準配布はUnix/macOS向けです。Windowsネイティブの`api2arl.exe`が必要です。公式ソースがWindowsで容易にビルドできることは未確認であり、準備できない場合はERA5を使った計算を実行できません。
-2. GUIの「api2arl.exe」にWindowsネイティブ実行ファイルの絶対パスを指定します。Linux実行ファイル・WSL経由の変換には対応しません。
-3. GUIの「NOAA filedates 実行ファイル」にWindowsから実行可能な`filedates.exe`を指定します。**変換後の時刻検査が不可能な場合はERA5での自動計算を中止**します。
-4. `pip install -r requirements-era5.txt`でecCodes関連のPython依存を導入し、ERA5 CDSで「一括計算を開始」を押します。
+Google ARCO ERA5はZarr/NetCDFで、GRIB1/GRIB2の変換とは別の格子・鉛直座標・気象変数処理が必要です。未検証のNetCDFをARLと偽って計算する処理は提供しません。
 
-変換時はecCodesでGRIB1→GRIB2を処理し、ERA5のジオポテンシャル`z` [m²/s²]をジオポテンシャル高度`gh` [m]に換算します。月をまたぐARLファイルは作らず、各UTC月のファイルに分割します。必須変数、気圧面数、時刻の欠損を検査し、不足があれば停止します。
+## 表示・保存
 
-**制限**: この変換経路は外部`api2arl`のバージョンや変数対応表`api2arl.cfg`に依存し、ERA5を使った実データでのエンドツーエンド検証は未実施です。ARLの日付検査が通っても、気象変数と値が物理的に正しいとは限りません。試験運用の位置づけとしてください。
-
-### Google Cloud ARCO ERA5を使うとき
-
-Google Researchの[ARCO ERA5](https://github.com/google-research/arco-era5)（`gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3`）の気圧面データ・地表データから、指定範囲・期間をNetCDFとして切り出します。GUIで`ERA5領域 N,W,S,E`（緯度・経度の矩形）を指定可能。空欄時には開始点を囲む領域を推定しますが、**過去72時間の流跡線がその領域に収まる保証はありません**。領域はユーザーが十分に広く設定してください。Google CloudのZarrチャンク構造により、狭い領域でも大きなデータ転送が生じることがあります。ARL変換は未対応です。
-
-Google Earth Engineの`ECMWF/ERA5/HOURLY`は地表単一レベル中心のデータで、単独では高層流跡線の気象場として不十分です。代わりにGoogle Cloud公開ARCO ERA5の高層データを対象にしています。
-
-## ダウンロード再開と結果表示
-
-NOAA ARLダウンロード中に通信が切れた場合は、`.part`と`.part.json`を削除せず再実行してください。サーバーが`If-Range`に対応している場合に再開します。対応していない場合は自動的に先頭からダウンロードします。
-
-HYSPLITが生成した`tdump`を解析した結果は、`runs/<実行ID>/map/index.html`（完全オフラインSVG／海岸線なし）および`runs/<実行ID>/map/trajectories.geojson`（QGIS等でオフライン閲覧可能）に保存します。OpenStreetMap・Leaflet・CDNは使用しません。大量の流跡線では描画数を制限します（GUI初期値500本）。**省略した軌跡は地図・GeoJSONには含まれず、元の`tdump`には残ります。** 経度180°付近の描画には注意してください。
-
-NOAA `filedates`の日時確認は**水平・鉛直範囲、必要気象変数、質量保存、軌跡の妥当性まで保証しません**。長時間遡る場合はモデルが移動する全領域を気象格子が覆っているかも確認してください。
-
-## 保存先
-
-```
-<保存フォルダ>/
-  met/gdas1/gdas1.oct26.w2   # 再利用可能な気象キャッシュ
-  runs/<実行ID>/
-    manifest.json            # 設定・ファイル・計算件数
-    map/index.html         # 完全オフラインの緯度経度図（SVG）
-    map/trajectories.geojson # GeoJSON（オフライン利用可）
-    20261010T0000Z_00000/
-      CONTROL                # 各時刻・バッチごとの設定
-      SETUP.CFG              # MSL/AGLを設定
-      ASCDATA.CFG            # HYSPLITのbdyfiles絶対パス
-      starts.csv             # tdump内のtrajectory番号と開始点の対応表
-      tdump                  # 後方流跡線出力
-      MESSAGE                # HYSPLITの診断メッセージ（HYSPLIT生成）
-      run.log                # 標準出力・標準エラー
-```
+実行フォルダに`CONTROL`、`SETUP.CFG`、`ASCDATA.CFG`、`starts.csv`、`tdump`、`MESSAGE`、`run.log`、`manifest.json`を保存します。結果から`map/index.html`（完全オフラインの簡易緯度・経度SVG図）と`map/trajectories.geojson`を生成します。地図にOpenStreetMap・Leaflet・CDNは使いません。海岸線・地形図は表示しません。QGISにGeoJSONを読み込めば地理情報と重ね合わせられます。
 
 ## テスト
 
 ```powershell
+cd D:\Codex\hysplit-scripts-students
 py -3 -m unittest discover -s tests -v
 ```
 
-単体テストはHYSPLIT本体や気象APIなしで実行でき、時刻境界、高度分割、オフセット、気象ファイル名、ダウンロードの安全な再開、ARL時刻検査、tdumpからの地図生成、並列実行（POSIXのモック）を検査します。GitHub ActionsではWindows上のみでユニットテストを実行します。**実際のWindows上の`hyts_std.exe`や本物のERA5 API・Google Cloudへの接続試験はまだ実施していません。** 物理的に正しい結果が得られることを保証するものではなく、NOAA HYSPLIT GUIによる同一条件の基準計算との照合が必要です。
+WindowsネイティブのGUI・HYSPLIT実行は検証対象です。ERA5/CDSのダウンロード・GRIB変換は利用データ、認証、フォーマットに左右されます。単体テストの成功だけで気象場の物理的な正しさを保証するものではありません。
 
-## 公式資料
-
-- [HYSPLITインストール](https://www.arl.noaa.gov/hysplit/getrun-hysplit/)
-- [CONTROLファイル仕様](https://hysplit2.arl.noaa.gov/hysplitusersguide/S262.htm)
-- [KMSL・高度基準](https://www.ready.noaa.gov/hysplitusersguide/S621.htm)
-- [ASCDATA.CFGと境界ファイル](https://ready2.arl.noaa.gov/hysplitusersguide/S444.htm)
-- [NOAA READY気象データアーカイブ](https://hysplit2.arl.noaa.gov/archives.php)
-- [HYSPLIT気象データ変換の注意点](https://hysplit2.arl.noaa.gov/documents/Tutorial/view/meteo_cnvrt.html)
-- [Google Research ARCO ERA5](https://github.com/google-research/arco-era5)
-- [Google Earth Engine ERA5 Hourly（地表単一レベル）](https://developers.google.com/earth-engine/datasets/catalog/ECMWF_ERA5_HOURLY)
-
-## 制約・今後の改善候補
-
-1. **ERA5/CDS外部変換パイプラインの実データ照合**、Google ARCO Zarr/NetCDF→ARLの変換対応（データセット別に変換手順の実証が必要）。
-2. ARL実ファイルの時刻範囲と変数セットの検査、欠損処理、計算結果へのメタデータ照合。
-3. 大容量ダウンロードの進行率・転送量表示、空き容量の事前検査、確実なキャンセル、提供側チェックサムとの照合（途中再開の基本機能は実装済み）。
-4. HYSPLIT標準GUIとの照合、同条件でのWindows回帰試験、気象場による感度・解像度評価。
-
-※ このリポジトリはNOAA公式ソフトウェアそのものではなく、`hyts_std.exe`や気象アーカイブのバイナリデータは同梱しません。
+参考：[NOAA HYSPLIT](https://www.arl.noaa.gov/hysplit/getrun-hysplit/) ／ [NOAA meteorological conversion](https://hysplit2.arl.noaa.gov/HYSPLIT_data2arl.php) ／ [ERA5 CDS](https://cds.climate.copernicus.eu/) ／ [Google ARCO ERA5](https://github.com/google-research/arco-era5)

@@ -1,18 +1,17 @@
-"""Windows-only execution policy regression checks."""
+"""Windows-native-only runtime policy tests."""
 
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from hysplit_tool.platform_guard import require_native_windows
-from hysplit_tool.era5_convert import _converter_command
+from hysplit_tool.native_era5 import run_native_grib1_pair
 
 
 class TestWindowsOnly(unittest.TestCase):
-    def test_policy_is_enforced_on_this_platform(self):
+    def test_policy_is_enforced_on_current_platform(self):
         if sys.platform == "win32" and os.name == "nt":
             require_native_windows()
         else:
@@ -24,16 +23,12 @@ class TestWindowsOnly(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 require_native_windows()
 
-    def test_wsl_converter_string_rejected(self):
-        with self.assertRaisesRegex(ValueError, "prohibited"):
-            _converter_command("wsl:/opt/hysplit/api2arl", Path("."), "input.grib2", "output.arl")
-
-    def test_converter_requires_windows_exe(self):
-        with tempfile.TemporaryDirectory() as temp:
-            executable = Path(temp) / "api2arl"
-            executable.write_text("mock", encoding="ascii")
-            with self.assertRaisesRegex(ValueError, "Windows-native"):
-                _converter_command(str(executable), Path(temp), "input.grib2", "output.arl")
+    def test_native_converter_calls_windows_guard_before_io(self):
+        with patch("hysplit_tool.native_era5.require_native_windows",
+                   side_effect=RuntimeError("native Windows required")):
+            with self.assertRaisesRegex(RuntimeError, "native Windows"):
+                run_native_grib1_pair(Path("missing_upper"), Path("missing_surface"),
+                                      Path("output.arl"), Path("grib2arl.exe"))
 
 
 if __name__ == "__main__":

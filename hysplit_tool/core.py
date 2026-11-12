@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import math
+import re
 import subprocess
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,7 @@ from typing import Callable, Iterable
 from .platform_guard import require_native_windows
 
 UTC = timezone.utc
+JST = timezone(timedelta(hours=9), name="JST")
 EARTH_RADIUS_KM = 6371.0088
 
 
@@ -122,28 +124,156 @@ def shifted_location(latitude: float, longitude: float, east_km: float, north_km
     return lat, lon
 
 
+def parse_jst(value: str) -> datetime:
+    """Read observer-supplied times as JST by default; return UTC.
+
+    Supported:
+      YYYY/MM/DD HH:MM[:SS], YYYY-MM-DD HH:MM[:SS],
+      YYYY.MM.DD HH:MM[:SS], YYYYMMDDHHMM[SS],
+      ISO-8601 with T and optional Z/+09:00, and optional JST/UTC suffix.
+    A timezone offset always overrides the JST default. HYSPLIT accepts
+    start times to minute precision, so seconds round to the nearest minute
+    (>=30 seconds rounds up). Keep the original CSV for reproducibility.
+    """
+    original = value.strip()
+    if not original:
+        raise ValueError("JST observation time is blank")
+    explicit = None
+    suffix = re.search(r"\s+(JST|UTC)$", original, flags=re.IGNORECASE)
+    if suffix:
+        explicit = JST if suffix.group(1).upper() == "JST" else UTC
+        original = original[:suffix.start()].strip()
+    compact = re.fullmatch(r"(\d{12}|\d{14})", original)
+    try:
+        if compact:
+            dt = datetime.strptime(original, "%Y%m%d%H%M%S" if len(original) == 14
+                                   else "%Y%m%d%H%M")
+        else:
+            value_iso = re.sub(
+                r"^(\d{4})[/.](\d{1,2})[/.](\d{1,2})",
+                lambda m: f"{int(m[1]):04}-{int(m[2]):02}-{int(m[3]):02}",
+                original,
+            ).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(value_iso)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid observation time {value!r}; expected YYYY/MM/DD HH:MM[:SS] (JST)"
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=explicit or JST)
+    elif explicit is not None:
+        raise ValueError("Specify either a UTC offset or JST/UTC suffix, not both")
+    utc = dt.astimezone(UTC)
+    # HYSPLIT accepts starts only to the minute. Round half up for
+    # real-world radiosonde CSV timestamps that carry seconds.
+    return (utc + timedelta(seconds=30)).replace(second=0, microsecond=0)
+
+
+def _csv_header(row: list[str]) -> bool:
+    """Detect a one-line header by its column types, not its literal labels."""
+    if len(row) != 4:
+        return False
+    try:
+        parse_jst(row[0])
+        return False
+    except ValueError:
+        pass
+    nonnumeric = 0
+    for field in row[1:]:
+        try:
+            float(field)
+        except ValueError:
+            nonnumeric += 1
+    return nonnumeric >= 2
+
+
 def load_starts_csv(path: Path) -> list[StartPoint]:
-    """CSV columns: time_utc,latitude,longitude,height_m. All UTC and meters."""
+    """Four columns in fixed order: time (JST), latitude, longitude, height m.
+
+    Optional header of arbitrary column names; UTF-8 BOM or Windows CSV (CP932).
+    Every row creates one base trajectory. No column-name matching required.
+    """
+    path = Path(path)
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp932")
     result = []
-    with Path(path).open(newline="", encoding="utf-8-sig") as file:
-        reader = csv.DictReader(file)
-        required = {"time_utc", "latitude", "longitude", "height_m"}
-        if not required.issubset(reader.fieldnames or []):
-            raise ValueError("CSV columns required: time_utc,latitude,longitude,height_m")
-        for line_number, row in enumerate(reader, start=2):
-            try:
-                result.append(StartPoint(
-                    parse_utc(row["time_utc"]),
-                    float(row["latitude"]),
-                    float(row["longitude"]),
-                    float(row["height_m"]),
-                    f"csv:{line_number}",
-                ))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"Invalid CSV row {line_number}: {exc}") from exc
+    first_row = True
+    for row_number, row in enumerate(csv.reader(text.splitlines()), start=1):
+        if not row or all(not str(field).strip() for field in row):
+            continue
+        if first_row and _csv_header(row):
+            first_row = False
+            continue
+        first_row = False
+        if len(row) != 4:
+            raise ValueError(
+                f"CSV row {row_number}: expected four columns: time,latitude,longitude,height_m"
+            )
+        try:
+            result.append(StartPoint(
+                parse_jst(row[0]), float(row[1]), float(row[2]), float(row[3]),
+                f"csv:{row_number}",
+            ))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid CSV row {row_number}: {exc}") from exc
     if not result:
-        raise ValueError("CSV has no data rows")
+        raise ValueError("CSV has no observation rows")
+    if len(result) > 100_000:
+        raise ValueError("CSV has more than 100,000 observation rows")
     return result
+
+
+def destination_location(latitude: float, longitude: float,
+                         bearing_deg: float, distance_km: float) -> tuple[float, float]:
+    """Destination at a great-circle distance, with bearing clockwise from north."""
+    if not math.isfinite(distance_km) or distance_km < 0:
+        raise ValueError("Shift distance must be nonnegative finite km")
+    if distance_km == 0:
+        return latitude, longitude
+    lat1 = math.radians(latitude)
+    lon1 = math.radians(longitude)
+    angle = math.radians(bearing_deg)
+    arc = distance_km / EARTH_RADIUS_KM
+    lat2 = math.asin(max(-1.0, min(1.0,
+        math.sin(lat1)*math.cos(arc) + math.cos(lat1)*math.sin(arc)*math.cos(angle))))
+    lon2 = lon1 + math.atan2(math.sin(angle)*math.sin(arc)*math.cos(lat1),
+                             math.cos(arc) - math.sin(lat1)*math.sin(lat2))
+    return math.degrees(lat2), (math.degrees(lon2) + 180) % 360 - 180
+
+
+def expand_observations(bases: Iterable[StartPoint], distance_km: float,
+                        time_shift_minutes: float, limit: int = 100_000) -> list[StartPoint]:
+    """Center + 8 compass bearings (equal radius); observation time ± minutes.
+
+    Positive distance produces 9 locations. Positive time_shift_minutes
+    produces 3 start times (-shift, 0, +shift), all resolved in UTC.
+    """
+    if not math.isfinite(distance_km) or distance_km < 0 or distance_km > 10000:
+        raise ValueError("Horizontal distance must be within 0..10000 km")
+    if (not math.isfinite(time_shift_minutes) or time_shift_minutes < 0
+            or time_shift_minutes > 10080 or not float(time_shift_minutes).is_integer()):
+        raise ValueError("Time shift must be a whole number of minutes (0..10080)")
+    bases = list(bases)
+    shifts = [0.0] if not time_shift_minutes else [
+        -time_shift_minutes, 0.0, time_shift_minutes]
+    bearings = [None] if distance_km == 0 else [
+        None, 0, 45, 90, 135, 180, 225, 270, 315]
+    if len(bases) * len(shifts) * len(bearings) > limit:
+        raise ValueError(f"Too many trajectories (limit {limit})")
+    points = []
+    for point in bases:
+        for delta in shifts:
+            when = point.when + timedelta(minutes=delta)
+            if not 1970 <= when.year <= 2099:
+                raise ValueError("Supported simulation years: 1970..2099")
+            for bearing in bearings:
+                lat, lon = (point.latitude, point.longitude) if bearing is None else \
+                    destination_location(point.latitude, point.longitude, bearing, distance_km)
+                points.append(StartPoint(when, lat, lon, point.height_m, point.origin))
+    return points
 
 
 def fixed_starts(
