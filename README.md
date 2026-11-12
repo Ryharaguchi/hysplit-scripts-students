@@ -70,15 +70,23 @@ CSVの高度欄をそのまま初期高度に使用します。500～1000 mを10
 
 高度基準は`AGL`（地上高）または`MSL`（平均海面基準の高度）を明示してください。GNSS楕円体高を使用する場合は、必要な基準変換を事前に行ってください。モデルの格子と鉛直解像度は、開始高度の100 m刻みとは異なります。
 
+## モデル上端と同時計算数
+
+**計算領域の上限高度 [m AGL]**（旧「モデル上端」）は、HYSPLITが使用する内部鉛直格子の上限です。CSVの観測高度や流跡線のジオポテンシャル高度ではありません。既定値は20,000 m AGLで、流跡線が上限に達すると打ち切られます。必要な上限は観測高度・逆流跡線の高度変化・気象データの鉛直範囲に応じて決めてください。上限を高くしても、気象入力に存在しない鉛直情報が増えるわけではありません。
+
+**同時に動かす計算プロセス数**（旧「並列実行数」）は、Windows上で同時起動する `hyts_std.exe` の数です。CSVの行数や最終的な流跡線本数とは異なります。同一開始時刻の複数軌跡は1つのプロセス内でまとめられるため、流跡線数81本でもプロセスの実行数が3になる場合があります。並列化はディスクI/Oやメモリ使用量が増えるので、通常はまず1～2で動作確認してください。
+
 ## 気象データの選択
 
-| データソース | 取得 | WindowsでのARL変換 | HYSPLIT実行 |
+| GUIの選択肢 | 入手元 | 取得・配布格子 | 形式とWindows計算 |
 |---|---|---|---|
-| GDAS1 | NOAA ARLを取得 | 不要 | 対応 |
-| GFS 0.25° | NOAA ARLを取得 | 不要 | 対応 |
-| ローカルARL | 既存のARLファイルを指定 | 不要 | 対応 |
-| ERA5 (CDS) | CDSからGRIBを取得 | **GRIB1に限り、Windows同梱のgrib2arl.exeで変換（実験的）** | 変換・時間検証成功時のみ |
-| ERA5 (Google ARCO) | Google CloudからNetCDFを取得 | **未実装** | 未対応 |
+| GDAS1 (1°) | NOAA | **約1° × 1°** | ARLを直接ダウンロードして計算 |
+| GFS (0.25°) | NOAA | **0.25° × 0.25°** | ARLを直接ダウンロードして計算 |
+| ローカルARL | 利用者が指定 | **ファイル依存** | 既存のARLを直接計算 |
+| ERA5 CDS (0.25°) | Copernicus CDS | **0.25° × 0.25°（緯度経度再格子化）** | GRIB1が得られた場合に限りWindowsのgrib2arl.exeで変換（試験的） |
+| ERA5 Google ARCO (0.25°) | Google Cloud | **0.25° × 0.25°（緯度経度再格子化）** | 現状NetCDFへ取得のみ。ARL変換・HYSPLIT計算は未実装 |
+
+**ERA5の水平解像度と配布格子は同一概念ではありません。** ERA5の大気再解析HRESの元の実効的な水平解像度は約31 km（ネイティブ表現で0.28125°相当）。CDSとGoogle ARCOから使用する0.25°等角格子は再格子化された**配布格子**です。0.25°を選んでも元の気象解析の実効的な解像度が改善されるわけではありません。ERA5 CDSは現在0.25°の格子で明示的に要求しています。取得領域はGUIに表示せず、全開始点の周辺から自動推定します。長い後方流跡線がこの矩形領域を出る可能性があり、科学的なカバレッジ保証ではありません。
 
 **`api2arl`、`filedates.exe`をGUIから選ばせません。** HYSPLITの`hyts_std.exe`が入っている`exec`フォルダから、GRIB1変換用の`grib2arl.exe`とARL時間検査用の`filedates.exe`を自動検出します。
 
@@ -92,11 +100,42 @@ CDS用の`cdsapi`だけを導入する場合は`py -3 -m pip install cdsapi`で�
 
 ERA5 CDSのGRIB1自動変換は**既存のWindows版変換ツールに基づく実験的機能**です。全てのCDSのGRIBで動作する保証はありません。変換後の気象場の妥当性を、元のERA5変数・HYSPLIT`MESSAGE`・別条件の基準計算と照合してください。
 
-Google ARCO ERA5はZarr/NetCDFで、GRIB1/GRIB2の変換とは別の格子・鉛直座標・気象変数処理が必要です。未検証のNetCDFをARLと偽って計算する処理は提供しません。
+### NetCDFからARLへ変換できないのか？
 
-## 表示・保存
+**変換自体は可能ですが、任意のNetCDFを汎用的に直接ARLへ変換する機能はありません。** NOAAの変換ソースには NetCDF入力用の `arw2arl`（WRF-ARW用）、`cdf2arl`（NCEP/NCAR再解析用）、`mer2arl`（MERRA2用）などがあり、いずれもデータ構造固有の変換処理です。ERA5 Google ARCOのZarr/NetCDFにこれらをそのまま適用するのは不適切です。
 
-実行フォルダに`CONTROL`、`SETUP.CFG`、`ASCDATA.CFG`、`starts.csv`、`tdump`、`MESSAGE`、`run.log`、`manifest.json`を保存します。結果から`map/index.html`（完全オフラインの簡易緯度・経度SVG図）と`map/trajectories.geojson`を生成します。地図にOpenStreetMap・Leaflet・CDNは使いません。海岸線・地形図は表示しません。QGISにGeoJSONを読み込めば地理情報と重ね合わせられます。
+Google ARCO用には、緯度経度格子・地上変数・気圧面データ・時間座標・欠損値と単位を照合し、ERA5に適合する中間形式（例えばGRIB1）へ変換後、Windowsネイティブの `grib2arl.exe` でARL化する専用パイプラインが必要です。**現時点ではそのARCO専用パイプラインは未実装・未検証**のため、このソースを選択した場合はNetCDF取得のみです。試験済みのERA5 GRIB1→ARL経路と区別してください。
+
+## 1回の計算結果はCSVを1ファイルに集約
+
+**1回の一括実行で1つの結果CSV `runs/<実行ID>/trajectories.csv` を生成します。** 複数のHYSPLITプロセス・複数時刻・複数地点・複数高度の結果を1つに結合し、**各流跡線の各出力時刻がCSVの1行**になります。入力CSVの行数と結果CSVの行数は異なります。81本の流跡線 × 1時間ごとの25点であれば2,025行です。
+
+| 主な出力列 | 意味 |
+|---|---|
+| `source_csv_row`, `run_group`, `trajectory_number` | 元の観測CSV行と計算グループ／流跡線番号 |
+| `start_time_jst`, `endpoint_time_jst` | 初期・各地点のJST日時（UTC日時も別列） |
+| `latitude_deg`, `longitude_deg`, `age_hours` | 位置と初期時刻からの経過時間（過去方向は負） |
+| `pressure_hpa` | HYSPLITの出力した地点気圧 |
+| `terrain_elevation_msl_m` | **HYSPLITのTERR_MSL診断変数による地表標高**（MSL、実測ではない） |
+| `trajectory_height_agl_m` | 流跡線の地上高（AGL、`KAGL=1`） |
+| `trajectory_height_msl_m_est` | **推定MSL高度＝AGL高度＋地表標高** |
+| `trajectory_geopotential_height_m_est` | **推定ジオポテンシャル高度**（地球を球とした重力近似による換算） |
+
+最後の2列は**計算値そのものではなく導出した概算**です。ERA5のジオポテンシャル値（m²/s²）を流跡線の位置で補間したものではありません。推定ジオポテンシャル高度は、MSLの幾何学的高度の近似値 h に対し `H ≈ R h/(R+h)`（`R=6,371,008.8 m`）を適用しています。緯度依存の重力・ジオイド差は反映しません。地表標高の診断が欠落する場合、MSLと推定ジオポテンシャル高度の列を**空欄**とし、値を捏造しません。
+
+実行時は `SETUP.CFG` に `KAGL=1`, `TM_TERR=1`, `TM_PRES=1` を明示し、地表標高・気圧を `tdump` に書き出します。元の観測CSVは `observations.csv` として保存し、`manifest.json` にはSHA-256を記録します。HYSPLITの内部生成ファイル `CONTROL`, `starts.csv`, `tdump`, `MESSAGE`, `run.log` なども診断・再現性のため残しますが、**結果の数表として利用するCSVは `trajectories.csv` 1つだけ**です。
+
+計算の一部が失敗した場合、完了済みの一部データを全件成功と誤認させないため、完全版CSVは生成せずエラーを表示します。別途 `map/index.html`（外部通信しない簡易緯度経度SVG）と `map/trajectories.geojson` を保存します。地図は表示の負荷を抑えるためプレビューする本数に内部上限がありますが、結果CSVには全件を出力します。
+
+### 公式参考資料
+
+- [NOAA HYSPLITの計算領域上端](https://ready.arl.noaa.gov/hysplitusersguide/S262.htm)
+- [NOAA 高度のMSL/AGL切替（KMSL/KAGL）](https://www.ready.noaa.gov/hysplitusersguide/S611.htm)
+- [NOAA 地表標高の出力（TM_TERR）](https://hysplit2.arl.noaa.gov/hysplitusersguide/S614.htm)
+- [ECMWF ERA5のジオポテンシャルと幾何学高度](https://confluence.ecmwf.int/pages/viewpage.action?pageId=226496719)
+- [Copernicus ERA5 pressure levels（0.25°）](https://cds.climate.copernicus.eu/datasets/reanalysis-era5-pressure-levels)
+- [Google Research ARCO ERA5（0.25°等角格子）](https://github.com/google-research/arco-era5)
+- [NOAA NetCDF/GRIBからのARL変換ソース](https://github.com/noaa-oar-arl/hysplit_data2arl)
 
 ## テスト
 

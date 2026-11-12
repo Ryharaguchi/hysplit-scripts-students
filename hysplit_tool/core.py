@@ -356,9 +356,17 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
     folder = Path(run_root) / f"{group.when:%Y%m%dT%H%MZ}_{group.ordinal:05d}"
     folder.mkdir(parents=True, exist_ok=False)
     (folder / "CONTROL").write_text(render_control(group, met_paths, back_hours, model_top_m), encoding="ascii")
-    # HYSPLIT reads SETUP.CFG in cwd. Default output height remains AGL (KAGL=1).
+    # KMSL sets how CONTROL starting heights are interpreted.
+    # KAGL=1 fixes tdump heights to AGL. TM_TERR=1 adds terrain MSL,
+    # enabling terrain elevation and estimated trajectory MSL in CSV.
     (folder / "SETUP.CFG").write_text(
-        "&SETUP\n KMSL = " + ("1" if height_reference == "MSL" else "0") + ",\n/\n", encoding="ascii"
+        "&SETUP\n"
+        " KMSL = " + ("1" if height_reference == "MSL" else "0") + ",\n"
+        " KAGL = 1,\n"
+        " TM_TERR = 1,\n"
+        " TM_PRES = 1,\n"
+        "/\n",
+        encoding="ascii",
     )
     # Per NOAA, each independent cwd needs its own ASCDATA.CFG to locate
     # the installed HYSPLIT boundary/terrain tables (critical for MSL input).
