@@ -34,6 +34,15 @@ PROVIDERS = {
 UTC = timezone.utc
 
 
+def discover_native_hysplit() -> Path:
+    """Use an existing Windows HYSPLIT install without hard-coded usernames."""
+    candidates = (
+        Path.home() / "Desktop" / "backwardtrajectory" / "HYSPLIT" / "exec" / "hyts_std.exe",
+        Path(r"C:\hysplit\exec\hyts_std.exe"),
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), candidates[-1])
+
+
 class App(tk.Tk):
     def __init__(self):
         require_native_windows()
@@ -45,9 +54,11 @@ class App(tk.Tk):
         self.busy = False
         self.last_run = None
         default_time = (datetime.now(UTC) - timedelta(days=14)).strftime("%Y-%m-%d 00:00")
+        detected_executable = discover_native_hysplit()
+        work_root = Path(r"D:\Codex") / "hysplit-batch" if Path(r"D:\Codex").is_dir() else Path.home() / "HYSPLIT-batch"
         defaults = {
-            "executable": r"C:\hysplit\exec\hyts_std.exe",
-            "root": str(Path.home() / "HYSPLIT-batch"),
+            "executable": str(detected_executable),
+            "root": str(work_root),
             "mode": "manual", "csv": "",
             "start": default_time, "end": default_time, "interval": "6",
             "lat": "35.0", "lon": "135.0", "heights": "500:10000:100",
@@ -55,7 +66,7 @@ class App(tk.Tk):
             "hours": "48", "top": "20000", "height_ref": "MSL",
             "workers": "2", "max_points": "100",
             "provider": next(iter(PROVIDERS)), "local_met": "", "bbox": "",
-            "api2arl": "", "filedates": r"C:\hysplit\exec\filedates.exe",
+            "api2arl": "", "filedates": str(detected_executable.parent / "filedates.exe"),
             "map_limit": "500",
         }
         self.v = {key: tk.StringVar(value=value) for key, value in defaults.items()}
