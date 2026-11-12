@@ -32,8 +32,9 @@ class TestJstCsv(unittest.TestCase):
         ):
             with self.subTest(value=value):
                 self.assertEqual(parse_jst(value), expected)
-        with self.assertRaisesRegex(ValueError, "seconds"):
-            parse_jst("2026/10/10 09:00:12")
+        self.assertEqual(parse_jst("2026/10/10 09:00:12"), expected)
+        self.assertEqual(parse_jst("2026/10/10 09:00:30"),
+                         datetime(2026, 10, 10, 0, 1, tzinfo=UTC))
         with self.assertRaises(ValueError):
             parse_jst("2026/99/10 09:00")
 
