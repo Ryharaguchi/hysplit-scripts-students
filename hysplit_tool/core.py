@@ -361,12 +361,45 @@ def render_control(group: RunGroup, met_paths: list[Path], back_hours: int, mode
     return "\n".join(lines) + "\n"
 
 
+def validate_time_controls(output_interval_minutes: int = 60,
+                           integration_step_minutes: int = 0) -> tuple[int, int]:
+    """Validate HYSPLIT TOUT/DELT in whole minutes.
+
+    DELT=0 leaves the integration step under HYSPLIT automatic control.
+    A manually fixed DELT must divide both 60 minutes and the requested
+    endpoint interval so the time grids are consistent. A bad setting must
+    fail before any trajectory work directory is created.
+    """
+    try:
+        tout = int(output_interval_minutes)
+        delt = int(integration_step_minutes)
+        if (str(output_interval_minutes).strip() not in (str(tout),)
+                or str(integration_step_minutes).strip() not in (str(delt),)):
+            raise ValueError("Time intervals must be whole minutes")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Time intervals must be whole minutes") from exc
+    if not 1 <= tout <= 1440:
+        raise ValueError("Output interval TOUT must be 1..1440 minutes")
+    if delt < 0 or delt > 60:
+        raise ValueError("Integration step DELT must be 0 (automatic) or 1..60 minutes")
+    if delt and (60 % delt != 0 or tout % delt != 0):
+        raise ValueError(
+            "Fixed DELT must divide 60 minutes and the output interval TOUT; "
+            "use DELT=0 for automatic integration"
+        )
+    return tout, delt
+
+
 def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hours: int,
                 model_top_m: float, height_reference: str = "AGL",
                 bdyfiles_dir: Path | None = None,
-                diagnostics: Iterable[str] = ()) -> Path:
+                diagnostics: Iterable[str] = (),
+                output_interval_minutes: int = 60,
+                integration_step_minutes: int = 0) -> Path:
     if height_reference not in ("AGL", "MSL"):
         raise ValueError("Height reference must be AGL or MSL")
+    tout, delt = validate_time_controls(output_interval_minutes,
+                                        integration_step_minutes)
     folder = Path(run_root) / f"{group.when:%Y%m%dT%H%MZ}_{group.ordinal:05d}"
     folder.mkdir(parents=True, exist_ok=False)
     (folder / "CONTROL").write_text(render_control(group, met_paths, back_hours, model_top_m), encoding="ascii")
@@ -380,6 +413,8 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
         " TM_TERR = 1,\n"
         " TM_PRES = 1,\n"
         " TFMT = 2,\n"
+        + f" TOUT = {tout},\n"
+        + f" DELT = {float(delt):.1f},\n"
         + flags_for_setup(diagnostics)
         + "/\n",
         encoding="ascii",

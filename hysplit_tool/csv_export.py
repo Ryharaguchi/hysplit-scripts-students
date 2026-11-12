@@ -160,6 +160,15 @@ def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
             if start_utc.tzinfo is None:
                 raise ValueError(f"Start metadata has a naive timestamp: {group_id}/{idx}")
             start_utc = start_utc.astimezone(UTC)
+            # TFMT=2 limits tdump's age (hours) to two decimal places.
+            # Reconstruct age from actual UTC minute timestamps so 1-, 5-
+            # and 10-minute endpoint intervals remain numerically faithful.
+            precise_age_hours = (when - start_utc).total_seconds() / 3600.0
+            if abs(precise_age_hours - age) > 0.03:
+                raise ValueError(
+                    f"Inconsistent trajectory endpoint age in {path}: "
+                    f"tdump {age} h vs UTC timestamps {precise_age_hours:.6f} h"
+                )
             origin = start.get("origin", "")
             source_row = origin.partition(":")[2] if origin.startswith("csv:") else ""
             row = {
@@ -174,7 +183,7 @@ def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
                 "start_height_reference": height_reference,
                 "endpoint_time_jst": when.astimezone(JST).isoformat(timespec="minutes"),
                 "endpoint_time_utc": when.isoformat(timespec="minutes"),
-                "age_hours": _plain_number(age, 3),
+                "age_hours": _plain_number(precise_age_hours, 6),
                 "latitude_deg": _plain_number(lat, 6),
                 "longitude_deg": _plain_number(lon, 6),
                 "pressure_hpa": _plain_number(diagnostics.get("PRESSURE"), 2),
