@@ -13,3 +13,8 @@ runs/
 *.arl
 tdump
 MESSAGE
+
+dist/
+build/
+releases/
+HYSPLIT_Batch_diagnostics.json

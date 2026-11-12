@@ -3,6 +3,18 @@
 **Windowsネイティブ専用。WSL/WSL2・Linux・macOSは実行対象外です。**
 計算者が作成した観測CSVから、各行の時刻・緯度・経度・高度を開始条件として、HYSPLITの後方流跡線を大量に計算するTkinter GUIです。NOAA READYのWeb上で数値計算を実行するものではありません。
 
+## Windows EXE配布版（Pythonインストール不要）
+
+Windows x64では、ポータブル配布フォルダの HYSPLIT_Batch.exe をダブルクリックすればGUIを起動できます。実行先のPCにはPython・Git・PowerShell・WSLは不要です。EXEファイルだけを取り出さず、配布フォルダの _internal も保持してください。
+
+**NOAA HYSPLITモデル本体は同梱しません。** [NOAA利用規約](https://hysplit2.arl.noaa.gov/HYSPLIT_agreement.php)では許可なきモデルソフトウェアの再配布は禁止されています。各PCで[公式Windows版](https://www.arl.noaa.gov/hysplit/getrun-hysplit/)を別途入手・導入してください。標準の C:/hysplit/exec/hyts_std.exe または HYSPLIT_HOME/HYSPLIT_EXE の指定先を自動検出します。見つからない場合はGUIで参照してください。HYSPLITの bdyfiles、grib2arl.exe、filedates.exe も必要です。
+
+デフォルトの保存先は %LOCALAPPDATA%/HYSPLIT_Batch です。Dドライブや開発者アカウントには依存しません。観測CSVはJST入力、実行ごとの結果CSVは trajectories.csv に集約します。ERA5 Google ARCO用のxarray、netCDF4、ecCodes、gcsfsはEXEに含めますが、気象データの取得にはネット接続が必要です。
+
+診断: HYSPLIT_Batch.exe --self-test diagnostics.json
+
+開発者向けWindows PowerShellビルドは build_windows_exe.ps1 を実行します。Windows用Python仮想環境にPyInstallerと requirements-era5.txt の依存パッケージをインストールしてください。配布ZIPは releases/HYSPLIT_Batch_Windows_x64.zip です。Windows用EXEはコード署名されていません。
+
 ## 起動
 
 Windows PowerShellから：
