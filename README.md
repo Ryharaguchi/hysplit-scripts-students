@@ -88,6 +88,29 @@ CSVの高度欄をそのまま初期高度に使用します。500～1000 mを10
 
 **同時に動かす計算プロセス数**（旧「並列実行数」）は、Windows上で同時起動する `hyts_std.exe` の数です。CSVの行数や最終的な流跡線本数とは異なります。同一開始時刻の複数軌跡は1つのプロセス内でまとめられるため、流跡線数81本でもプロセスの実行数が3になる場合があります。並列化はディスクI/Oやメモリ使用量が増えるので、通常はまず1～2で動作確認してください。
 
+## 流跡線上に出力する気象変数（チェックボックス）
+
+GUIの「1. 後方流跡線の設定」→「流跡線上に出力する気象変数」で、以下の8項目を個別にON/OFFできます。初期値は8項目すべてONです。チェックしない項目は最終CSVの列として出力しません。一方、位置・時刻・気圧と地表標高は基本列として常時記録します。
+
+| GUI表示 | HYSPLIT設定 | tdumpラベル | trajectories.csvの列 | 単位 |
+|---|---|---|---|---|
+| 温位 | TM_TPOT | THETA | potential_temperature_k | K |
+| 気温 | TM_TAMB | AIR_TEMP | air_temperature_k | K |
+| 相対湿度 | TM_RELH | RELHUMID | relative_humidity_percent | % |
+| 比湿 | TM_SPHU | SPCHUMID | specific_humidity_g_per_kg_moist_air | g/kg（湿潤空気） |
+| 水蒸気混合比 | TM_MIXR | H2OMIXRA | water_vapor_mixing_ratio_g_per_kg_dry_air | g/kg（乾燥空気） |
+| 東西風速U | TM_UWND | UWIND | eastward_wind_m_s | m/s |
+| 南北風速V | TM_VWND | VWIND | northward_wind_m_s | m/s |
+| 混合層高度 | TM_MIXD | MIXDEPTH | mixing_layer_depth_m | m |
+
+計算時、SETUP.CFGに選択したTM_* = 1を記録します。気圧TM_PRES = 1と地表標高TM_TERR = 1は常時有効です。数値出力の桁数を増やすためTFMT = 2を指定します。HYSPLITの出力変数の順序はモデル側で固定されていますが、CSVでは診断ラベル名で照合し、常に一定の列順で保存します。tdumpに選択した変数が存在しない場合は、不完全な結果CSVを作らずエラーとします。
+
+比湿は水蒸気質量を湿潤空気全体の質量で割ったもの、水蒸気混合比は乾燥空気の質量で割ったものです。小さい値では近くなりますが同義ではありません。湿度や混合層高度などの物理値は、GDAS・GFS・ERA5の入力により欠測・導出・計算方法の違いがあり得ます。チェックしただけで物理的妥当性が保証されるわけではありません。
+
+Windowsネイティブhyts_std.exeとERA5由来ARLで8項目を有効にし、後方3時間の実計算で10個のtdump診断変数（気圧・地表標高と8項目）と27列の統合CSVを確認しました。
+
+参照：[NOAA HYSPLIT — Meteorology Output Along Trajectory](https://hysplit2.arl.noaa.gov/hysplitusersguide/S614.htm) / [NOAA Trajectory Output Format](https://hysplit2.arl.noaa.gov/hysplitusersguide/S263.htm)
+
 ## 気象データの選択
 
 | GUIの選択肢 | 入手元 | 取得・配布格子 | 形式とWindows計算 |
