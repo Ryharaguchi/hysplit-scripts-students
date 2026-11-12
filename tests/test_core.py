@@ -4,6 +4,7 @@ import csv
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,7 +86,8 @@ class TestCore(unittest.TestCase):
             folders = [base / f"case{i}" for i in range(3)]
             for f in folders:
                 f.mkdir()
-            results = execute_groups(stub, folders, workers=2)
+            with patch("hysplit_tool.core.require_native_windows"):
+                results = execute_groups(stub, folders, workers=2)
             self.assertEqual(len(results), 3)
             self.assertTrue(all(ok for _, ok in results))
 

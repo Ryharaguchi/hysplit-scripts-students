@@ -20,6 +20,7 @@ from .core import (execute_groups, expand_starts, fixed_starts, group_starts,
 from .era5 import download_cds, download_google_arco
 from .era5_convert import convert_cds_to_arl
 from .plot import create_map
+from .platform_guard import require_native_windows
 from .validation import check_coverage
 from .meteo import download_noaa, local_arl_files, plan_archives
 
@@ -35,6 +36,7 @@ UTC = timezone.utc
 
 class App(tk.Tk):
     def __init__(self):
+        require_native_windows()
         super().__init__()
         self.title(f"HYSPLIT Batch Trajectories {__version__}")
         self.geometry("920x760")
@@ -127,7 +129,7 @@ class App(tk.Tk):
                      state="readonly", width=59).grid(row=0, column=1, sticky="ew", padx=5)
         self._entry(source, "ローカルARLファイル (複数選択可)", "local_met", 1, 55, self._pick_arl)
         self._entry(source, "ERA5の領域 N,W,S,E (空欄は自動)", "bbox", 2, 45)
-        self._entry(source, "api2arl実行ファイル (WSLは wsl:/...)", "api2arl", 4, 65)
+        self._entry(source, "api2arl.exe (Windowsネイティブ実行ファイル)", "api2arl", 4, 65)
         self._entry(source, "NOAA filedates 実行ファイル", "filedates", 5, 65, self._pick_filedates)
         self._entry(source, "地図表示の最大流跡線数", "map_limit", 6)
         ttk.Label(source, text="ERA5の領域は開始点周辺の推定値です。後方経路を必ず含むとは限りません。",
@@ -398,4 +400,5 @@ class App(tk.Tk):
 
 
 def main():
+    require_native_windows()
     App().mainloop()

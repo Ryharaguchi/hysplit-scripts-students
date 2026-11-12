@@ -20,14 +20,14 @@ class TestEra5ConversionBridge(unittest.TestCase):
     def test_external_converter_missing(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            with self.assertRaises(FileNotFoundError):
+            with self.assertRaises(FileNotFoundError), patch("hysplit_tool.era5_convert.require_native_windows"):
                 convert_cds_to_arl([], root, datetime(2026, 1, 1, tzinfo=UTC),
                                    datetime(2026, 1, 2, tzinfo=UTC),
-                                   converter="/not/existing/api2arl", filedates=root / "filedates")
+                                   converter="C:/not/existing/api2arl.exe", filedates=root / "filedates")
 
     def test_native_command(self):
         with tempfile.TemporaryDirectory() as td:
-            executable = Path(td) / "api2arl"
+            executable = Path(td) / "api2arl.exe"
             executable.write_bytes(b"fake")
             command = _converter_command(str(executable), Path(td), "input.grib2", "output.arl")
             self.assertEqual(command[-3:], ["-iinput.grib2", "-ooutput.arl", "-t50"])
@@ -35,7 +35,7 @@ class TestEra5ConversionBridge(unittest.TestCase):
     def test_stages_monthly_arl_and_calls_validation(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            converter, filedates = root / "api2arl", root / "filedates"
+            converter, filedates = root / "api2arl.exe", root / "filedates.exe"
             converter.write_bytes(b"tool")
             filedates.write_bytes(b"tool")
             date_a = datetime(2026, 1, 31, 23, tzinfo=UTC)
@@ -64,7 +64,8 @@ class TestEra5ConversionBridge(unittest.TestCase):
 
             with patch("hysplit_tool.era5_convert.convert_grib_to_hourly_grib2", fake_split), \
                  patch("hysplit_tool.era5_convert.subprocess.run", fake_run), \
-                 patch("hysplit_tool.era5_convert.check_coverage", fake_check):
+                 patch("hysplit_tool.era5_convert.check_coverage", fake_check), \
+                 patch("hysplit_tool.era5_convert.require_native_windows"):
                 paths = convert_cds_to_arl([root / "input.grib"],
                     root / "dest", date_a, date_b,
                     converter=str(converter), filedates=filedates)
