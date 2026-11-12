@@ -1,4 +1,4 @@
-﻿# Build a self-contained Windows GUI. NOAA HYSPLIT is deliberately excluded.
+# Build a self-contained Windows GUI. NOAA HYSPLIT is deliberately excluded.
 param(
     [string]$Python = "",
     [string]$OutDir = "",
@@ -9,10 +9,21 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 if (-not $Python) {
-    $Python = Join-Path $root ".venv\Scripts\python.exe"
+    # Building from a clean Windows virtual environment avoids accidentally
+    # collecting unrelated globally installed Python packages.
+    $Python = Join-Path $root ".buildvenv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $Python)) {
+        & py -3.12 -m venv (Join-Path $root ".buildvenv")
+        if ($LASTEXITCODE -ne 0) { throw "Python 3.12 is required for packaging." }
+    }
+    & $Python -c "import PyInstaller, xarray, eccodes, zarr, gcsfs, netCDF4"
+    if ($LASTEXITCODE -ne 0) {
+        & $Python -m pip install -r (Join-Path $root "requirements-era5.txt") "pyinstaller==6.11.1" --disable-pip-version-check --no-input
+        if ($LASTEXITCODE -ne 0) { throw "Unable to install Windows packaging dependencies." }
+    }
 }
 if (-not (Test-Path -LiteralPath $Python)) {
-    throw "Build Python not found: $Python. Create a Windows venv and install requirements-era5.txt plus PyInstaller."
+    throw "Build Python not found: $Python"
 }
 & $Python -c "import PyInstaller, xarray, eccodes, zarr, gcsfs, netCDF4; print('build-dependencies-ok')"
 if ($LASTEXITCODE -ne 0) {
@@ -39,9 +50,12 @@ Get-ChildItem (Join-Path $root "samples") -Filter "*.csv" -File | ForEach-Object
     Copy-Item -LiteralPath $_.FullName -Destination $sampleDir -Force
 }
 $diag = Join-Path $root "build\portable_self_test.json"
-& $exe --self-test $diag
-if ($LASTEXITCODE -ne 0) {
-    throw "Standalone EXE self-test failed. Open $diag for details."
+# A Windows GUI-subsystem process does not always update PowerShell's
+# LASTEXITCODE synchronously. Wait explicitly for its real process exit.
+$args = '--self-test "' + $diag + '"'
+$testProcess = Start-Process -FilePath $exe -ArgumentList $args -Wait -PassThru
+if ($testProcess.ExitCode -ne 0) {
+    throw "Standalone EXE self-test failed (exit $($testProcess.ExitCode)). Open $diag."
 }
 if (-not (Test-Path -LiteralPath $diag)) {
     throw "EXE did not create diagnostics file: $diag"

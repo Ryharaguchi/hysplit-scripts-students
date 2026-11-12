@@ -1,4 +1,4 @@
-﻿# -*- mode: python ; coding: utf-8 -*-
+# -*- mode: python ; coding: utf-8 -*-
 """Windows x64 portable HYSPLIT Batch GUI, without NOAA model executables.
 
 PyInstaller builds all Python, tkinter and ERA5 dependencies into an onedir
@@ -21,7 +21,8 @@ hiddenimports = [
 # These packages are imported dynamically in meteorology adapters.
 # Include native DLLs and Zarr codec/provider registrations as well.
 for package in (
-    "eccodes", "netCDF4", "gcsfs", "fsspec", "zarr", "numcodecs", "cdsapi",
+    "numpy", "eccodes", "netCDF4", "gcsfs", "fsspec",
+    "zarr", "numcodecs", "cdsapi",
 ):
     data_files, dll_files, mods = collect_all(package)
     datas.extend(data_files)
@@ -29,7 +30,7 @@ for package in (
     hiddenimports.extend(mods)
 
 for package in (
-    "xarray.backends", "zarr.codecs", "numcodecs", "google.auth",
+    "numpy._core", "xarray.backends", "zarr.codecs", "numcodecs", "google.auth",
     "google.cloud.storage", "google.api_core", "google.resumable_media",
 ):
     hiddenimports.extend(collect_submodules(package, on_error="warn"))
