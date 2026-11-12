@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import threading
@@ -318,7 +319,12 @@ class App(tk.Tk):
                 run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:6]
                 run_root = root / "runs" / run_id
                 run_root.mkdir(parents=True, exist_ok=False)
+                # Keep the exact source observation CSV for scientific provenance.
+                observation_bytes = Path(conf["csv"]).read_bytes()
+                (run_root / "observations.csv").write_bytes(observation_bytes)
                 metadata = {"settings": conf, "meteorology": [str(p) for p in met_paths],
+                            "observation_csv_copy": "observations.csv",
+                            "observation_csv_sha256": hashlib.sha256(observation_bytes).hexdigest(),
                             "start_count": len(points), "execution_count": len(groups),
                             "utc_bounds": [earliest.isoformat(), latest.isoformat()],
                             "arl_times_verified": coverage.verified,
@@ -364,6 +370,7 @@ class App(tk.Tk):
             "時刻, 緯度, 経度, 高度m の4列。ヘッダーあり・なし両対応。\n"
             "例: 2026/10/10 09:00,35,135,500\n"
             "タイムゾーン無指定は日本時間、明示的な+09:00・Zはその指定を優先。\n\n"
+            "秒は最も近い分に丸めます（30秒以上は切り上げ）。\n\n"
             "【水平ずらし】\n"
             "0kmは観測位置のみ。5kmは中心・上下左右・斜めの9地点。\n"
             "斜めも中心から5kmです。\n\n"
