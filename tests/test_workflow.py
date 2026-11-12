@@ -96,6 +96,25 @@ class TestValidation(unittest.TestCase):
                                     datetime(2026, 1, 2, tzinfo=UTC))
             self.assertFalse(report.verified)
 
+    def test_filedates_invoked_from_arl_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            met = directory / "met.arl"
+            exe = directory / "filedates.exe"
+            met.write_bytes(b"ARLTEST")
+            exe.write_bytes(b"dummy")
+            from subprocess import CompletedProcess
+            with patch("hysplit_tool.validation.subprocess.run",
+                       return_value=CompletedProcess([], 0,
+                           stdout="26 10 10 00 00\n26 10 10 03 00\n26 10 10 06 00", stderr="")) as runner:
+                report = check_coverage(
+                    [met], datetime(2026, 10, 10, 0, tzinfo=UTC),
+                    datetime(2026, 10, 10, 6, tzinfo=UTC), exe)
+            self.assertTrue(report.verified)
+            command, = runner.call_args.args
+            self.assertEqual(command[-1], met.name)
+            self.assertEqual(runner.call_args.kwargs["cwd"], met.resolve().parent)
+
     def test_valid_coverage_and_gap(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
