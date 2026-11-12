@@ -162,7 +162,8 @@ class TestPlot(unittest.TestCase):
             self.assertIn("<svg", html)
             self.assertIn("offline", html)
             self.assertNotIn("https://", html)
-            self.assertNotIn("http://", html)
+            # The standard SVG XML namespace is an identifier, not a network request.
+            self.assertNotIn("http://", html.replace('xmlns="http://www.w3.org/2000/svg"', ""))
             self.assertNotIn("<script", html)
 
     def test_offline_plot_crosses_dateline_safely(self):
