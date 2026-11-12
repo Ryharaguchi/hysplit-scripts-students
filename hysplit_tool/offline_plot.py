@@ -119,4 +119,4 @@ small {{display:block;color:#516274;padding:12px 2px;line-height:1.6}}
 海岸線、国境、地形は表示しません。緯度経度の簡易投影図のため、距離の測定には使用しないでください。
 詳細な地理情報の解析は同じフォルダのtrajectories.geojsonをQGIS等で開いてください。</small>
 </main></body></html>
-""
+"""
