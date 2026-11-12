@@ -24,6 +24,7 @@ from .plot import create_map
 from .platform_guard import require_native_windows
 from .validation import check_coverage
 from .meteo import download_noaa, local_arl_files, plan_archives
+from .portable import default_work_root, find_hysplit_executable
 from .csv_export import export_run_csv
 
 PROVIDERS = {
@@ -37,12 +38,8 @@ UTC = timezone.utc
 
 
 def discover_native_hysplit() -> Path:
-    """Use an existing Windows HYSPLIT install without hard-coded usernames."""
-    candidates = (
-        Path.home() / "Desktop" / "backwardtrajectory" / "HYSPLIT" / "exec" / "hyts_std.exe",
-        Path(r"C:\hysplit\exec\hyts_std.exe"),
-    )
-    return next((candidate for candidate in candidates if candidate.is_file()), candidates[-1])
+    """Locate a separately installed NOAA HYSPLIT on the current Windows PC."""
+    return find_hysplit_executable()
 
 
 class App(tk.Tk):
@@ -56,7 +53,7 @@ class App(tk.Tk):
         self.busy = False
         self.last_run = None
         detected_executable = discover_native_hysplit()
-        work_root = Path(r"D:\Codex") / "hysplit-batch" if Path(r"D:\Codex").is_dir() else Path.home() / "HYSPLIT-batch"
+        work_root = default_work_root()
         defaults = {
             "executable": str(detected_executable), "root": str(work_root),
             "csv": "", "distance_km": "0", "time_shift_minutes": "0",
@@ -171,6 +168,19 @@ class App(tk.Tk):
         scrollbar.pack(side="right", fill="y")
         self.log.configure(yscrollcommand=scrollbar.set)
         self._log("観測CSVの時刻はJSTとして読み取ります。内部でUTCへ変換します。")
+        detected_executable = Path(self.v["executable"].get())
+        if not detected_executable.is_file():
+            self._log(
+                "HYSPLIT本体が見つかりません。NOAA公式サイトからWindows版を別途導入し、"
+                "「HYSPLIT実行ファイル」でhyts_std.exeを指定してください。"
+                "NOAA利用規約により本アプリには同梱していません。"
+            )
+        elif not (detected_executable.parent.parent / "bdyfiles").is_dir():
+            self._log(
+                "HYSPLITのbdyfilesフォルダがありません。"
+                "正規インストールのexec/hyts_std.exeを選択してください。"
+            )
+
 
     def _pick_executable(self):
         value = filedialog.askopenfilename(title="hyts_std.exe", filetypes=[("EXE", "*.exe"), ("All files", "*.*")])
