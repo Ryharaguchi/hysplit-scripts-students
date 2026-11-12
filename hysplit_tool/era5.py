@@ -28,6 +28,11 @@ ARCO_SURFACE_FIELDS = [
     "surface_pressure", "total_precipitation", "boundary_layer_height",
     "geopotential_at_surface",
 ]
+# ARCO does not necessarily contain pressure-level relative_humidity. It
+# provides specific_humidity (kg/kg) in the 0.25-degree pressure-level archive.
+# Keep the CDS request fields separate: CDS can supply relative_humidity itself.
+ARCO_PRESSURE_FIELDS = [key for key in PRESSURE_FIELDS if key != "relative_humidity"]
+ARCO_HUMIDITY_ALTERNATIVES = ("relative_humidity", "specific_humidity")
 ARCO_PRESSURE_LEVELS = [int(level) for level in PRESSURE_LEVELS]
 
 def region_around(lat: float, lon: float, lat_radius: float = 25, lon_radius: float = 35):
@@ -138,10 +143,25 @@ def download_google_arco(earliest: datetime, latest: datetime, target_dir: Path,
     selection = selection.sel(longitude=selection.longitude.where(select_lon, drop=True))
     if not selection.sizes.get("time") or not selection.sizes.get("latitude") or not selection.sizes.get("longitude"):
         raise ValueError("Selected ERA5 window is empty (check dates and region)")
-    required = PRESSURE_FIELDS + ARCO_SURFACE_FIELDS
+    required = ARCO_PRESSURE_FIELDS + ARCO_SURFACE_FIELDS
     missing = sorted(set(required) - set(selection.data_vars))
     if missing:
         raise ValueError(f"ARCO dataset lacks ARL conversion variables: {missing}")
+    # Use direct relative humidity if supplied; otherwise retain specific
+    # humidity and convert it in arco_convert.py after selecting each p level.
+    humidity_name = next(
+        (name for name in ARCO_HUMIDITY_ALTERNATIVES if name in selection.data_vars),
+        None,
+    )
+    if humidity_name is None:
+        raise ValueError(
+            "ARCO humidity unavailable: expected specific_humidity (kg/kg) "
+            "or relative_humidity (%) on pressure levels"
+        )
+    required = required + [humidity_name]
+    if humidity_name == "specific_humidity" and notify:
+        notify("ARCO provides specific_humidity: relative_humidity will be "
+               "derived from q, temperature and pressure during GRIB1 conversion")
     if "level" not in selection.coords:
         raise ValueError("ARCO pressure-level coordinate missing")
     actual = set(int(x) for x in selection.level.values)

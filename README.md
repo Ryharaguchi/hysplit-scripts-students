@@ -100,6 +100,16 @@ CDS用の`cdsapi`だけを導入する場合は`py -3 -m pip install cdsapi`で�
 
 ERA5 CDSのGRIB1自動変換は**既存のWindows版変換ツールに基づく実験的機能**です。全てのCDSのGRIBで動作する保証はありません。変換後の気象場の妥当性を、元のERA5変数・HYSPLIT`MESSAGE`・別条件の基準計算と照合してください。
 
+### Google ARCO：比湿から相対湿度への変換
+
+Google ARCOの0.25°気圧面データに relative_humidity（相対湿度）がなく、specific_humidity（比湿、kg/kg）だけがある場合にも対応します。NetCDFの気温 temperature（K）、比湿 specific_humidity（kg/kg）、気圧面の圧力（hPa）から相対湿度（%）を導出した上で、GRIB1のECMWFパラメータ157（RELH）へ変換します。
+
+水蒸気分圧は比湿 q と気圧 p（Pa）から e=p*q/(ε+(1-ε)*q)、ε=0.621981 とします。飽和水蒸気圧は水（273.16 K以上）と氷（250.16 K以下）、中間温度では二乗混合とするECMWF系の式に従い、RH=100*e/es_mixed(T) と計算します。100%を超える相対湿度を自動的に100%へ丸めません。欠損値、不正な比湿・気温はエラーとして停止します。
+
+これらのRHは**元データに収録された相対湿度ではなく計算値**です。ARL出力に対応するメタデータJSONにも、直接RHを取得したのか、比湿から導出したのかを記録します。
+
+参考：[ECMWF Metview: relative_humidity_from_specific_humidity](https://metview.readthedocs.io/en/latest/api/functions/relative_humidity_from_specific_humidity.html)
+
 ### Google ARCO ERA5のNetCDF → ARL（Windowsのみ）
 
 Google ARCO ERA5 (0.25°)を選択すると、Google Cloudの0.25°緯度経度格子Zarrから、対象時刻・観測地点周辺の領域、必要な気象変数と次の12気圧面をNetCDFへ切り出します。
