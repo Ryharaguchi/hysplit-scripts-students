@@ -14,22 +14,21 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
-from .core import (execute_groups, expand_starts, fixed_starts, group_starts,
-                   load_starts_csv, parse_heights, parse_time_offsets,
-                   parse_utc, parse_xy_offsets, write_group)
+from .core import (JST, execute_groups, expand_observations, group_starts,
+                   load_starts_csv, write_group)
 from .era5 import download_cds, download_google_arco
-from .era5_convert import convert_cds_to_arl
+from .native_era5 import convert_cds_grib1_to_arl
 from .plot import create_map
 from .platform_guard import require_native_windows
 from .validation import check_coverage
 from .meteo import download_noaa, local_arl_files, plan_archives
 
 PROVIDERS = {
-    "GDAS1 | NOAA 全球1°・ARL（推奨）": "gdas1",
-    "GFS 0.25° | NOAA 全球・ARL（大容量）": "gfs0p25",
-    "手元のARLファイルを使用": "local",
-    "ERA5 | Copernicus CDS（外部api2arlで変換・実行）": "era5_cds",
-    "ERA5 | Google ARCO（取得のみ・NetCDF）": "arco_era5",
+    "GDAS1": "gdas1",
+    "GFS 0.25°": "gfs0p25",
+    "ローカルARL": "local",
+    "ERA5 (CDS)": "era5_cds",
+    "ERA5 (Google ARCO)": "arco_era5",
 }
 UTC = timezone.utc
 
@@ -53,20 +52,14 @@ class App(tk.Tk):
         self.events = queue.Queue()
         self.busy = False
         self.last_run = None
-        default_time = (datetime.now(UTC) - timedelta(days=14)).strftime("%Y-%m-%d 00:00")
         detected_executable = discover_native_hysplit()
         work_root = Path(r"D:\Codex") / "hysplit-batch" if Path(r"D:\Codex").is_dir() else Path.home() / "HYSPLIT-batch"
         defaults = {
-            "executable": str(detected_executable),
-            "root": str(work_root),
-            "mode": "manual", "csv": "",
-            "start": default_time, "end": default_time, "interval": "6",
-            "lat": "35.0", "lon": "135.0", "heights": "500:1000:100",
-            "xy": "0,0", "dt": "0",
+            "executable": str(detected_executable), "root": str(work_root),
+            "csv": "", "distance_km": "0", "time_shift_minutes": "0",
             "hours": "48", "top": "20000", "height_ref": "MSL",
             "workers": "2", "max_points": "100",
             "provider": next(iter(PROVIDERS)), "local_met": "", "bbox": "",
-            "api2arl": "", "filedates": str(detected_executable.parent / "filedates.exe"),
             "map_limit": "500",
         }
         self.v = {key: tk.StringVar(value=value) for key, value in defaults.items()}
@@ -110,29 +103,28 @@ class App(tk.Tk):
         self._entry(loc, "HYSPLIT実行ファイル (.exe)", "executable", 0, 65, self._pick_executable)
         self._entry(loc, "作業・データ保存フォルダ", "root", 1, 65, self._pick_root)
 
-        bases = self._group(setup_content, "開始点（UTC、緯度・経度、標高）")
-        modes = ttk.Frame(bases)
-        modes.grid(row=0, column=0, columnspan=3, sticky="w", pady=3)
-        ttk.Radiobutton(modes, text="固定地点 × 高度 × 時刻", variable=self.v["mode"], value="manual").pack(side="left", padx=4)
-        ttk.Radiobutton(modes, text="観測CSV（地点ごとに位置・時刻・高度）", variable=self.v["mode"], value="csv").pack(side="left", padx=4)
-        self._entry(bases, "観測CSV (任意)", "csv", 1, 65, self._pick_csv)
-        self._entry(bases, "開始UTC (固定地点のみ)", "start", 2)
-        self._entry(bases, "終了UTC (固定地点のみ)", "end", 3)
-        self._entry(bases, "時刻間隔 [h] (固定地点のみ)", "interval", 4)
-        self._entry(bases, "緯度 [°N] (固定地点のみ)", "lat", 5)
-        self._entry(bases, "経度 [°E] (固定地点のみ)", "lon", 6)
-        self._entry(bases, "高度[m] (固定地点のみ;例 500:1000:100)", "heights", 7)
+        bases = self._group(setup_content, "観測CSV（JST）")
+        self._entry(bases, "CSV（時刻, 緯度, 経度, 高度m）", "csv", 0, 65, self._pick_csv)
+        ttk.Label(bases, text="ヘッダーあり・なし両対応。例: 2026/10/10 09:00,35,135,500",
+                  foreground="#495b6c").grid(
+                      row=1, column=0, columnspan=3, sticky="w", padx=5)
 
-        settings = self._group(setup_content, "感度解析・実行設定")
-        self._entry(settings, "水平ずらし (東km,北km;...)", "xy", 0, 60)
-        self._entry(settings, "開始時刻ずらし [h] (例 -1,0,1)", "dt", 1)
-        self._entry(settings, "後方計算時間 [h]", "hours", 2)
-        self._entry(settings, "モデル上端 [m]", "top", 3)
-        ttk.Label(settings, text="入力高度の基準").grid(row=4, column=0, sticky="w", padx=5, pady=4)
-        ttk.Combobox(settings, textvariable=self.v["height_ref"], values=["AGL", "MSL"],
-                     state="readonly", width=10).grid(row=4, column=1, sticky="w", padx=5)
-        self._entry(settings, "並列実行数 (1～32)", "workers", 5)
-        self._entry(settings, "1実行当たり最大開始点数", "max_points", 6)
+        settings = self._group(setup_content, "観測時刻・位置の感度解析")
+        self._entry(settings, "水平ずらし距離 [km] (0=なし)", "distance_km", 0)
+        self._entry(settings, "観測時刻の前後に試す [分] (0=なし)", "time_shift_minutes", 1)
+        ttk.Label(settings, text="距離を入れると中心＋北・北東・東・南東・南・南西・西・北西の9地点。").grid(
+            row=2, column=0, columnspan=3, sticky="w", padx=5)
+        ttk.Label(settings, text="時間を入れると観測時刻の前・同時刻・後の3通り。").grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=5)
+
+        run_settings = self._group(setup_content, "後方流跡線の計算条件")
+        self._entry(run_settings, "何時間前まで遡るか [h]", "hours", 0)
+        self._entry(run_settings, "モデル上端 [m]", "top", 1)
+        ttk.Label(run_settings, text="CSVの高度の基準").grid(row=2, column=0, sticky="w", padx=5)
+        ttk.Combobox(run_settings, textvariable=self.v["height_ref"], values=["AGL", "MSL"],
+                     state="readonly", width=10).grid(row=2, column=1, sticky="w", padx=5)
+        self._entry(run_settings, "並列実行数 (1～32)", "workers", 3)
+        self._entry(run_settings, "1実行当たり最大開始点数", "max_points", 4)
 
         source = self._group(meteo, "データソースの選択")
         ttk.Label(source, text="気象データ").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -140,9 +132,7 @@ class App(tk.Tk):
                      state="readonly", width=59).grid(row=0, column=1, sticky="ew", padx=5)
         self._entry(source, "ローカルARLファイル (複数選択可)", "local_met", 1, 55, self._pick_arl)
         self._entry(source, "ERA5の領域 N,W,S,E (空欄は自動)", "bbox", 2, 45)
-        self._entry(source, "api2arl.exe (Windowsネイティブ実行ファイル)", "api2arl", 4, 65)
-        self._entry(source, "NOAA filedates 実行ファイル", "filedates", 5, 65, self._pick_filedates)
-        self._entry(source, "地図表示の最大流跡線数", "map_limit", 6)
+        self._entry(source, "地図表示の最大流跡線数", "map_limit", 4)
         ttk.Label(source, text="ERA5の領域は開始点周辺の推定値です。後方経路を必ず含むとは限りません。",
                   foreground="#855000").grid(row=3, column=0, columnspan=3, sticky="w", padx=5)
 
@@ -185,11 +175,6 @@ class App(tk.Tk):
         if value:
             self.v["executable"].set(value)
 
-    def _pick_filedates(self):
-        value = filedialog.askopenfilename(title="NOAA filedates", filetypes=[("Executable", "*.exe"), ("All files", "*.*")])
-        if value:
-            self.v["filedates"].set(value)
-
     def _pick_root(self):
         value = filedialog.askdirectory(title="HYSPLIT作業フォルダ")
         if value:
@@ -199,13 +184,12 @@ class App(tk.Tk):
         value = filedialog.askopenfilename(title="開始点CSV", filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
         if value:
             self.v["csv"].set(value)
-            self.v["mode"].set("csv")
 
     def _pick_arl(self):
         values = filedialog.askopenfilenames(title="ARLファイルを複数選択")
         if values:
             self.v["local_met"].set(";".join(values))
-            self.v["provider"].set("手元のARLファイルを使用")
+            self.v["provider"].set("ローカルARL")
 
     def _log(self, line):
         self.log.configure(state="normal")
