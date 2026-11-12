@@ -75,7 +75,11 @@ def check_coverage(met_paths: list[Path], earliest: datetime, latest: datetime,
         return CoverageReport(False, ("NOAA filedates utility not installed: ARL timestamps unverified.",))
     times = set()
     for path in paths:
-        result = subprocess.run([str(Path(filedates).resolve()), str(path.resolve())],
+        # NOAA's Windows filedates.exe opens an ARL basename in its current
+        # directory; passing an absolute input path can fail with code 900.
+        absolute_path = path.resolve()
+        result = subprocess.run([str(Path(filedates).resolve()), absolute_path.name],
+                                cwd=absolute_path.parent,
                                 capture_output=True, text=True, errors="replace", timeout=180)
         if result.returncode:
             raise RuntimeError(f"filedates failed for {path.name}: {result.stderr.strip()[:400]}")
