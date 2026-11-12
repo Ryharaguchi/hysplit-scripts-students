@@ -136,6 +136,44 @@ def _check_field(field, pressure: bool):
         raise ValueError(f"Unsupported extra dimensions {extra} in {field.name!r}")
 
 
+# ECMWF IFS CY41R2 saturation formulations: mixed water/ice phase. The
+# 250.16 K to 273.16 K transition is consistent with Metview's q -> RH
+# definition, which uses e(q,p) / e_mixed_saturation(T).
+_EPSILON = 0.621981  # R_d / R_v, dry-air-to-water-vapour gas constant ratio
+
+
+def relative_humidity_from_specific_humidity(
+    temperature_kelvin, specific_humidity, pressure_hpa: float, np,
+):
+    """Return RH [%] from ERA5 q [kg/kg], T [K] and isobaric pressure [hPa].
+
+    Saturation is with respect to water above 273.16 K, ice below 250.16 K
+    and a squared mixed-phase blend between them. Supersaturation is retained;
+    humidity values must not be silently clipped to [0,100] percent.
+    """
+    t = np.asarray(temperature_kelvin, dtype=np.float64)
+    q = np.asarray(specific_humidity, dtype=np.float64)
+    if t.shape != q.shape or not t.size:
+        raise ValueError("Specific humidity and temperature grids are incompatible")
+    if (not np.all(np.isfinite(t)) or not np.all(np.isfinite(q)) or
+            np.any(t < 150.0) or np.any(t > 350.0) or
+            np.any(q < 0.0) or np.any(q >= 1.0)):
+        raise ValueError("Invalid ERA5 specific humidity (kg/kg) or temperature (K)")
+    p = float(pressure_hpa) * 100.0
+    if not 0.0 < p <= 120000.0:
+        raise ValueError("Invalid ERA5 isobaric pressure level")
+    vapour_pressure = p * q / (_EPSILON + (1.0 - _EPSILON) * q)
+    saturation_water = 611.21 * np.exp(17.502 * (t - 273.16) / (t - 32.19))
+    saturation_ice = 611.21 * np.exp(22.587 * (t - 273.16) / (t + 0.7))
+    water_fraction = np.clip((t - 250.16) / 23.0, 0.0, 1.0) ** 2
+    saturation_mixed = (water_fraction * saturation_water +
+                        (1.0 - water_fraction) * saturation_ice)
+    relative_humidity_percent = 100.0 * vapour_pressure / saturation_mixed
+    if not np.all(np.isfinite(relative_humidity_percent)):
+        raise ValueError("Calculated ERA5 relative humidity contains invalid values")
+    return relative_humidity_percent
+
+
 def _load_slice(field, index: int, lat_order, lon_order, np, *, level: int | None = None):
     if level is not None:
         field = field.sel(level=level)
@@ -211,10 +249,21 @@ def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
     try:
         times = _utc_times(ds, np)
         lat_order, lon_order, lat, lon = _axes(ds, np)
+        pressure_humidity = ("relative_humidity" if "relative_humidity" in ds
+                             else "specific_humidity")
+        if pressure_humidity not in ds:
+            raise ValueError(
+                "ARCO NetCDF missing pressure humidity: require specific_humidity "
+                "(kg/kg) or relative_humidity (%)"
+            )
         for name, _param, _units in PRESSURE_PARAMS:
-            if name not in ds:
-                raise ValueError(f"ARCO NetCDF missing pressure variable {name}")
-            _check_field(ds[name], True)
+            source_name = pressure_humidity if name == "relative_humidity" else name
+            if source_name not in ds:
+                raise ValueError(f"ARCO NetCDF missing pressure variable {source_name}")
+            _check_field(ds[source_name], True)
+        if pressure_humidity == "specific_humidity" and notify:
+            notify("Deriving RH [%] from ARCO specific_humidity [kg/kg], "
+                   "temperature [K] and isobaric pressure [hPa]; mixed water/ice saturation")
         for name, _param, _units in SURFACE_PARAMS:
             if name not in ds:
                 raise ValueError(f"ARCO NetCDF missing surface variable {name}")
@@ -227,7 +276,20 @@ def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
                            f"({i+1}/{len(times)} hourly records)")
                 for level in PRESSURE_LEVELS:
                     for name, param, _units in PRESSURE_PARAMS:
-                        values = _load_slice(ds[name], i, lat_order, lon_order, np, level=level)
+                        if name == "relative_humidity" and pressure_humidity == "specific_humidity":
+                            temperature = _load_slice(
+                                ds["temperature"], i, lat_order, lon_order, np, level=level
+                            )
+                            q = _load_slice(
+                                ds["specific_humidity"], i, lat_order, lon_order, np, level=level
+                            )
+                            values = relative_humidity_from_specific_humidity(
+                                temperature, q, float(level), np
+                            )
+                        else:
+                            values = _load_slice(
+                                ds[name], i, lat_order, lon_order, np, level=level
+                            )
                         _encode_message(e, upper, values, when, param=param,
                                         level=level, lat=lat, lon=lon)
                 for name, param, _units in SURFACE_PARAMS:
@@ -276,6 +338,13 @@ def convert_arco_netcdf_to_arl(netcdf: Path, target_dir: Path,
     surface = target_dir / f"arco_era5_{token}_surface.grib"
     if not (pressure.is_file() and surface.is_file()):
         netcdf_to_grib1(netcdf, pressure, surface, notify)
+    # Preserve provenance: GRIB1 outputs RH parameter 157 in either case,
+    # but the field is derived when the input supplies specific humidity.
+    import xarray as xr
+    with xr.open_dataset(netcdf, engine="netcdf4") as nc:
+        humidity_input = ("relative_humidity" if "relative_humidity" in nc.data_vars
+                          else "specific_humidity" if "specific_humidity" in nc.data_vars
+                          else "unknown")
     from .native_era5 import run_native_grib1_pair
     staged = run_native_grib1_pair(
         pressure, surface, output, converter, level_count=13, notify=notify
@@ -290,6 +359,13 @@ def convert_arco_netcdf_to_arl(netcdf: Path, target_dir: Path,
             "intermediate_pressure_grib": str(pressure),
             "intermediate_surface_grib": str(surface),
             "grib_edition": 1, "pressure_levels_hpa": list(PRESSURE_LEVELS),
+            "humidity_input": humidity_input,
+            "humidity_output": "relative_humidity (%) / ECMWF GRIB1 paramId=157",
+            "humidity_derivation": (
+                "q,T,p -> RH; ECMWF mixed water/ice saturation formula"
+                if humidity_input == "specific_humidity"
+                else "direct relative_humidity field"
+            ),
             "time_count": report.time_count,
             "first": report.first.isoformat() if report.first else None,
             "last": report.last.isoformat() if report.last else None,
