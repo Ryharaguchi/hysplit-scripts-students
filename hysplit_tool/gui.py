@@ -23,13 +23,14 @@ from .plot import create_map
 from .platform_guard import require_native_windows
 from .validation import check_coverage
 from .meteo import download_noaa, local_arl_files, plan_archives
+from .csv_export import export_run_csv
 
 PROVIDERS = {
-    "GDAS1": "gdas1",
-    "GFS 0.25°": "gfs0p25",
+    "GDAS1 (1°)": "gdas1",
+    "GFS (0.25°)": "gfs0p25",
     "ローカルARL": "local",
-    "ERA5 (CDS)": "era5_cds",
-    "ERA5 (Google ARCO)": "arco_era5",
+    "ERA5 CDS (0.25°)": "era5_cds",
+    "ERA5 Google ARCO (0.25°)": "arco_era5",
 }
 UTC = timezone.utc
 
@@ -60,8 +61,7 @@ class App(tk.Tk):
             "csv": "", "distance_km": "0", "time_shift_minutes": "0",
             "hours": "48", "top": "20000", "height_ref": "MSL",
             "workers": "2", "max_points": "100",
-            "provider": next(iter(PROVIDERS)), "local_met": "", "bbox": "",
-            "map_limit": "500",
+            "provider": next(iter(PROVIDERS)), "local_met": "",
         }
         self.v = {key: tk.StringVar(value=value) for key, value in defaults.items()}
         self._widgets()
@@ -120,11 +120,11 @@ class App(tk.Tk):
 
         run_settings = self._group(setup_content, "後方流跡線の計算条件")
         self._entry(run_settings, "何時間前まで遡るか [h]", "hours", 0)
-        self._entry(run_settings, "モデル上端 [m]", "top", 1)
+        self._entry(run_settings, "計算領域の上限高度 [m AGL]", "top", 1)
         ttk.Label(run_settings, text="CSVの高度の基準").grid(row=2, column=0, sticky="w", padx=5)
         ttk.Combobox(run_settings, textvariable=self.v["height_ref"], values=["AGL", "MSL"],
                      state="readonly", width=10).grid(row=2, column=1, sticky="w", padx=5)
-        self._entry(run_settings, "並列実行数 (1～32)", "workers", 3)
+        self._entry(run_settings, "同時に動かす計算プロセス数 (1～32)", "workers", 3)
         self._entry(run_settings, "1実行当たり最大開始点数", "max_points", 4)
 
         source = self._group(meteo, "データソースの選択")
@@ -132,20 +132,21 @@ class App(tk.Tk):
         ttk.Combobox(source, textvariable=self.v["provider"], values=list(PROVIDERS),
                      state="readonly", width=59).grid(row=0, column=1, sticky="ew", padx=5)
         self._entry(source, "ローカルARLファイル (複数選択可)", "local_met", 1, 55, self._pick_arl)
-        self._entry(source, "ERA5の領域 N,W,S,E (空欄は自動)", "bbox", 2, 45)
-        self._entry(source, "地図表示の最大流跡線数", "map_limit", 4)
-        ttk.Label(source, text="ERA5の領域は開始点周辺の推定値です。後方経路を必ず含むとは限りません。",
-                  foreground="#855000").grid(row=3, column=0, columnspan=3, sticky="w", padx=5)
+        ttk.Label(source,
+                  text="ERA5取得領域は開始点の周囲から自動設定します。"
+                       "長い流跡線が領域外へ出る可能性は残ります。",
+                  foreground="#855000").grid(
+                      row=2, column=0, columnspan=3, sticky="w", padx=5)
 
         notes = self._group(meteo, "対応状況と重要事項")
         for line in [
-            "GDAS1: NOAAのARLデータを取得してWindowsで計算します。",
-            "GFS 0.25°: NOAAのARLデータを取得してWindowsで計算します。",
+            "GDAS1：全球 約1°格子。NOAAのARLデータを取得して計算。",
+            "GFS 0.25°：全球 0.25°格子。NOAAのARLデータを取得して計算。",
             "ローカルARL: 手元のARLファイルで計算します。",
-            "ERA5 (CDS): GRIB1をWindowsのgrib2arl.exeでARL変換します（実験的）。",
-            "ERA5 (Google ARCO): NetCDFの取得まで。ARL変換は未対応です。",
+            "ERA5 CDS：0.25°×0.25°の配布格子（大気解析の実効分解能は約31 km）。GRIB1をARL変換（試験的）。",
+            "ERA5 Google ARCO：0.25°×0.25°格子。NetCDF取得まで。ARL変換は未対応。",
             "grib2arl.exeとfiledates.exeはHYSPLITの実行フォルダから自動検出します。",
-            "地図: OpenStreetMapは使用しません。オフラインの緯度経度図とGeoJSONを出力します。",
+            "出力：全流跡線を1つのtrajectories.csvに集約。別途オフライン図とGeoJSONも保存。",
             "取得には大量のディスク容量・通信量が必要です。観測期間+後方計算期間を対象にします。",
         ]:
             ttk.Label(notes, text="• " + line, wraplength=820, justify="left").pack(anchor="w", pady=2)
@@ -213,21 +214,15 @@ class App(tk.Tk):
             raise ValueError("高度の基準は AGL または MSL です。")
         if not 1 <= int(conf["workers"]) <= 32:
             raise ValueError("並列数は1～32です。")
-        if not 1 <= int(conf["map_limit"]) <= 5000:
-            raise ValueError("地図表示上限は1～5000です。")
         earliest = min(p.when for p in points) - timedelta(hours=back_hours)
         latest = max(p.when for p in points)
         provider = PROVIDERS[conf["provider"]]
-        if conf["bbox"]:
-            bbox = tuple(float(v.strip()) for v in conf["bbox"].split(","))
-            if len(bbox) != 4:
-                raise ValueError("ERA5領域は N,W,S,E の4値です")
-        else:
-            north = min(90.0, max(p.latitude for p in points) + 25)
-            south = max(-90.0, min(p.latitude for p in points) - 25)
-            west = max(-180.0, min(p.longitude for p in points) - 35)
-            east = min(180.0, max(p.longitude for p in points) + 35)
-            bbox = (north, west, south, east)
+        # Auto-compute regional ERA5 subset; long backward paths can exit this area.
+        north = min(90.0, max(p.latitude for p in points) + 25)
+        south = max(-90.0, min(p.latitude for p in points) - 25)
+        west = max(-180.0, min(p.longitude for p in points) - 35)
+        east = min(180.0, max(p.longitude for p in points) + 35)
+        bbox = (north, west, south, east)
         if not (-90 <= bbox[2] < bbox[0] <= 90 and -180 <= bbox[1] < bbox[3] <= 180):
             raise ValueError("ERA5領域の範囲が不正です。N> S、W< Eで指定してください")
         return conf, points, groups, earliest, latest, provider, bbox
@@ -349,10 +344,22 @@ class App(tk.Tk):
                 results = execute_groups(Path(conf["executable"]), folders,
                                          int(conf["workers"]), notify=self._notify)
                 failures = sum(not success for _, success in results)
-                self._notify(f"FINISHED: {len(results)-failures}/{len(results)} successful. Output: {run_root}")
+                if failures:
+                    raise RuntimeError(
+                        f"{failures} HYSPLIT runs failed. See per-group MESSAGE/run.log; "
+                        "no complete batch CSV was written."
+                    )
+                exported = export_run_csv(run_root, height_reference=conf["height_ref"],
+                                          group_folders=folders)
+                self._notify(
+                    f"Batch CSV: {exported.path} | {exported.trajectories} trajectories, "
+                    f"{exported.endpoints} endpoints; "
+                    f"{exported.missing_terrain_endpoints} rows missing terrain elevation"
+                )
+                self._notify(f"FINISHED: {len(results)} groups successful. Output: {run_root}")
                 try:
                     page, geojson, shown, total = create_map(
-                        run_root, max_trajectories=int(conf["map_limit"]))
+                        run_root)
                     self._notify(f"Map: {page} / GeoJSON: {geojson} ({shown}/{total} trajectories)")
                 except (FileNotFoundError, ValueError, OSError) as exc:
                     self._notify(f"Map not generated: {exc}")
@@ -376,7 +383,13 @@ class App(tk.Tk):
             "斜めも中心から5kmです。\n\n"
             "【観測時刻の前後】\n"
             "0分は観測時刻のみ。30分は前30分・観測時刻・後30分の3通り。\n\n"
-            "【後方計算時間】\nCSVに記載された各時刻から何時間過去へ遡るか。\n\n"
+            "【後方計算時間】\nCSVの時刻から何時間過去へ遡るか。\n\n"
+            "【計算領域の上限高度】\nHYSPLITの鉛直計算範囲の上限（m AGL）。"
+            "流跡線が上限に達すると計算は終了します。\n\n"
+            "【同時計算プロセス数】\n同時に実行するWindows版HYSPLITの数。"
+            "流跡線の総本数ではありません。\n\n"
+            "【出力】\n一括計算ごとにtrajectories.csvに全軌跡を集約。"
+            "標高、AGL高度、推定MSL高度、推定ジオポテンシャル高度を別列で出力。\n\n"
             "【データソース】\n"
             "GDAS1/GFS: NOAA ARLを自動取得しWindows上で計算。\n"
             "ローカルARL: 保存済みARLを使用。\n"
@@ -391,7 +404,7 @@ class App(tk.Tk):
         if not folder:
             return
         try:
-            page, geojson, shown, total = create_map(Path(folder), max_trajectories=int(self.v["map_limit"].get()))
+            page, geojson, shown, total = create_map(Path(folder))
             self._log(f"地図: {page} / GeoJSON: {geojson} ({shown}/{total} trajectories)")
             webbrowser.open(page.resolve().as_uri())
         except (OSError, ValueError) as exc:
