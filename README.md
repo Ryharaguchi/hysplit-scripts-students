@@ -82,7 +82,13 @@ CSVの高度欄をそのまま初期高度に使用します。500～1000 mを10
 
 **`api2arl`、`filedates.exe`をGUIから選ばせません。** HYSPLITの`hyts_std.exe`が入っている`exec`フォルダから、GRIB1変換用の`grib2arl.exe`とARL時間検査用の`filedates.exe`を自動検出します。
 
-ERA5 (CDS)ではCopernicus CDSへの登録・利用規約の同意・API設定（`~/.cdsapirc`）とPythonの`cdsapi`が必要です。取得形式がGRIB2の場合は、GRIB1用の`grib2arl.exe`へ渡さず明示的に停止します。変換中にデータが不足する、時間を検査できない場合もモデル実行を停止します。
+ERA5 (CDS)ではCopernicus CDSへの登録・利用規約の同意・API設定（`~/.cdsapirc`）とPythonの`cdsapi`が必要です。
+
+```powershell
+py -3 -m pip install -r requirements-era5.txt
+```
+
+CDS用の`cdsapi`だけを導入する場合は`py -3 -m pip install cdsapi`でも構いません。取得形式がGRIB2の場合は、GRIB1用の`grib2arl.exe`へ渡さず明示的に停止します。変換中にデータが不足する、時間を検査できない場合もモデル実行を停止します。
 
 ERA5 CDSのGRIB1自動変換は**既存のWindows版変換ツールに基づく実験的機能**です。全てのCDSのGRIBで動作する保証はありません。変換後の気象場の妥当性を、元のERA5変数・HYSPLIT`MESSAGE`・別条件の基準計算と照合してください。
 
