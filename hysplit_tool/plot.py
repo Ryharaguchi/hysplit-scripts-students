@@ -1,15 +1,16 @@
 """Read HYSPLIT tdump files and create a lightweight GeoJSON + HTML map.
 
-No Python plotting dependency. HTML uses Leaflet and OpenStreetMap online;
-GeoJSON remains usable offline (e.g. in QGIS).
+No plotting dependency, online tile services, Leaflet or CDN.
+HTML and GeoJSON are usable entirely offline (e.g. in QGIS).
 """
 from __future__ import annotations
 
-import html
 import json
 import math
 from collections import defaultdict
 from pathlib import Path
+
+from .offline_plot import offline_html
 
 
 def read_tdump(path: Path) -> dict[int, list[tuple[float, float, float, float]]]:
@@ -114,53 +115,11 @@ def create_map(run_root: Path, *, max_trajectories: int = 500,
     geo_path = output / "trajectories.geojson"
     geo_path.write_text(json.dumps(geo, ensure_ascii=False), encoding="utf-8")
 
-    # Escape angle brackets in script-embedded JSON; never use untrusted data as HTML.
-    inline_data = json.dumps(geo, ensure_ascii=False).replace("<", "\\u003c")
-    title = html.escape(run_root.name, quote=True)
+    # Offline SVG preview: no OpenStreetMap tiles, Leaflet, or CDN required.
+    title = run_root.name
     note = (f"Showing {len(features):,} of {total:,} trajectories; "
-            "the rest are omitted from this map and GeoJSON."
+            "other trajectories remain in original tdump files."
             if len(features) < total else f"Showing all {len(features):,} trajectories.")
-    html_text = """<!doctype html>
-<html lang="ja"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HYSPLIT trajectories: __TITLE__</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<style>body{font:14px system-ui, sans-serif;margin:0}header{padding:10px 14px}
-#map{height:calc(100vh - 85px);min-height:300px}small{color:#666}</style></head>
-<body><header><b>HYSPLIT backward trajectories</b> — __TITLE__<div>
-<small>__NOTE__ Online access is required for map tiles and Leaflet; GeoJSON is saved beside this file.</small></div></header>
-<div id="map"></div><script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script>
-const collection = __DATA__;
-if (typeof L !== 'undefined') {
-  const map = L.map('map').setView([35, 135], 4);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    {attribution: '&copy; OpenStreetMap contributors', maxZoom: 18}).addTo(map);
-  const colors = ['#1660a1','#d65c32','#237c58','#8a42a0','#aa8b18'];
-  const all = L.featureGroup().addTo(map);
-  collection.features.forEach((feature, index) => {
-    let previous = null;
-    const line = feature.geometry.coordinates.map(p => {
-      let lon = p[0];
-      if (previous !== null) {
-        while (lon - previous > 180) lon -= 360;
-        while (lon - previous < -180) lon += 360;
-      }
-      previous = lon;
-      return [p[1],lon];
-    });
-    const poly = L.polyline(line, {color: colors[index % colors.length], weight: 1.8,
-      opacity: 0.7}).addTo(all);
-    const props = feature.properties;
-    const popup = document.createElement('div');
-    popup.textContent = props.run + ' / track ' + props.trajectory +
-      ' / start altitude ' + props.start_altitude_agl_m.toFixed(0) + ' m AGL';
-    poly.bindPopup(popup);
-  });
-  if (all.getLayers().length) map.fitBounds(all.getBounds(), {padding: [20,20]});
-}
-</script></body></html>"""
     html_path = output / "index.html"
-    html_path.write_text(html_text.replace("__TITLE__", title).replace("__NOTE__", html.escape(note))
-                         .replace("__DATA__", inline_data), encoding="utf-8")
+    html_path.write_text(offline_html(features, title, note), encoding="utf-8")
     return html_path, geo_path, len(features), total

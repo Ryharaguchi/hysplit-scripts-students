@@ -158,7 +158,27 @@ class TestPlot(unittest.TestCase):
             page, geo, shown, total = create_map(run)
             self.assertEqual((shown, total), (1, 1))
             self.assertIn("FeatureCollection", geo.read_text(encoding="utf-8"))
-            self.assertIn("leaflet", page.read_text(encoding="utf-8").lower())
+            html = page.read_text(encoding="utf-8").lower()
+            self.assertIn("<svg", html)
+            self.assertIn("offline", html)
+            self.assertNotIn("https://", html)
+            # The standard SVG XML namespace is an identifier, not a network request.
+            self.assertNotIn("http://", html.replace('xmlns="http://www.w3.org/2000/svg"', ""))
+            self.assertNotIn("<script", html)
+
+    def test_offline_plot_crosses_dateline_safely(self):
+        from hysplit_tool.offline_plot import offline_html, _unwrap
+        features = [{
+            "type": "Feature",
+            "properties": {"trajectory": 1, "run": "test", "start_altitude_agl_m": 500},
+            "geometry": {"type": "LineString",
+                         "coordinates": [[179.9, 35, 500], [-179.9, 35.1, 500]]},
+        }]
+        html = offline_html(features, "test", "1 of 1")
+        self.assertIn("<path", html)
+        self.assertEqual(_unwrap([179.9, -179.9], 179.9), [179.9, 180.1])
+        self.assertNotIn("tile.openstreetmap", html)
+        self.assertNotIn("unpkg.com", html)
 
     def test_invalid_tdump_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

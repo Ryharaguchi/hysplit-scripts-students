@@ -61,8 +61,8 @@ class App(tk.Tk):
             "root": str(work_root),
             "mode": "manual", "csv": "",
             "start": default_time, "end": default_time, "interval": "6",
-            "lat": "35.0", "lon": "135.0", "heights": "500:10000:100",
-            "xy": "0,0;5,0;-5,0;0,5;0,-5", "dt": "-1,0,1",
+            "lat": "35.0", "lon": "135.0", "heights": "500:1000:100",
+            "xy": "0,0", "dt": "0",
             "hours": "48", "top": "20000", "height_ref": "MSL",
             "workers": "2", "max_points": "100",
             "provider": next(iter(PROVIDERS)), "local_met": "", "bbox": "",
@@ -116,12 +116,12 @@ class App(tk.Tk):
         ttk.Radiobutton(modes, text="固定地点 × 高度 × 時刻", variable=self.v["mode"], value="manual").pack(side="left", padx=4)
         ttk.Radiobutton(modes, text="観測CSV（地点ごとに位置・時刻・高度）", variable=self.v["mode"], value="csv").pack(side="left", padx=4)
         self._entry(bases, "観測CSV (任意)", "csv", 1, 65, self._pick_csv)
-        self._entry(bases, "開始UTC (YYYY-MM-DD HH:MM)", "start", 2)
-        self._entry(bases, "終了UTC (同時刻可)", "end", 3)
-        self._entry(bases, "時刻間隔 [h]", "interval", 4)
-        self._entry(bases, "緯度 [°N]", "lat", 5)
-        self._entry(bases, "経度 [°E]", "lon", 6)
-        self._entry(bases, "高度[m] (例 500:10000:100)", "heights", 7)
+        self._entry(bases, "開始UTC (固定地点のみ)", "start", 2)
+        self._entry(bases, "終了UTC (固定地点のみ)", "end", 3)
+        self._entry(bases, "時刻間隔 [h] (固定地点のみ)", "interval", 4)
+        self._entry(bases, "緯度 [°N] (固定地点のみ)", "lat", 5)
+        self._entry(bases, "経度 [°E] (固定地点のみ)", "lon", 6)
+        self._entry(bases, "高度[m] (固定地点のみ;例 500:1000:100)", "heights", 7)
 
         settings = self._group(setup_content, "感度解析・実行設定")
         self._entry(settings, "水平ずらし (東km,北km;...)", "xy", 0, 60)
@@ -150,10 +150,11 @@ class App(tk.Tk):
         for line in [
             "NOAA GDAS1（全球1°）: ARLを自動取得して実行可能。週ファイルは約0.6GB。",
             "NOAA GFS 0.25°（全球）: ARLを自動取得して実行可能。日ファイル約3GB以上。",
-            "ローカルARL: 手持ちのARL形式気象ファイルを使用して実行可能。",
+            "ローカルARL: すでに保存済みのARLを使用。ERA5をARL化済みの場合もこちらを選択。",
             "ERA5 CDS: ecCodesと外部api2arlがあればGRIB→ARLに変換。filedatesによる時刻検証必須。",
             "Google ARCO ERA5: Google Cloud公開ZarrからNetCDFを抽出。ARL変換は未実装。",
             "ERA5は変数・座標変換を伴います。変換後もNOAA基準計算との照合が必要です。",
+            "地図: OpenStreetMapは使用しません。オフラインの緯度経度図とGeoJSONを出力します。",
             "取得には大量のディスク容量・通信量が必要です。観測期間+後方計算期間を対象にします。",
         ]:
             ttk.Label(notes, text="• " + line, wraplength=820, justify="left").pack(anchor="w", pady=2)
@@ -165,6 +166,7 @@ class App(tk.Tk):
             ttk.Button(bottom, text="気象データを取得", command=lambda: self.start_task("download")),
             ttk.Button(bottom, text="一括計算を開始", command=lambda: self.start_task("run")),
             ttk.Button(bottom, text="結果を地図で表示", command=self.plot_results),
+            ttk.Button(bottom, text="入力の説明", command=self.show_help),
         ]
         for button in self.buttons:
             button.pack(side="left", padx=5)
@@ -374,6 +376,24 @@ class App(tk.Tk):
         except Exception as exc:
             self.events.put(("error", str(exc)))
             self._notify(traceback.format_exc(limit=3))
+
+    def show_help(self):
+        messagebox.showinfo(
+            "入力の説明",
+            "【観測CSV】\n"
+            "time_utc,latitude,longitude,height_m の4列。時刻はUTC、緯度経度は符号付き十進度、高度はm。\n"
+            "CSVモードでは開始日時・時刻間隔・緯度経度・高度の各入力欄は使いません。\n\n"
+            "【時刻間隔】\n固定地点モードで、開始UTCから終了UTCまで何時間おきに始めるか。\n"
+            "例: 00:00～06:00を2h間隔 → 00,02,04,06時の4時刻。\n\n"
+            "【高度】\n500:1000:100 → 500,600,700,800,900,1000m の6高度。固定地点モードのみ。\n\n"
+            "【水平ずらし】\n東km,北km。0,0は移動なし。5,0は東5km。0,-5は南5km。\n"
+            "複数: 0,0;5,0;-5,0;0,5;0,-5\n\n"
+            "【開始時刻ずらし】\n0はそのまま。-1,0,1は各開始点を前1h、同時刻、後1hで3倍にします。\n\n"
+            "【データソース】\nGDAS/GFSはNOAAのARLをダウンロードして計算。\n"
+            "ローカルARLは既存のARLファイルで計算。ERA5 CDSは取得・外部変換が必要で試験的。\n"
+            "Google ARCO ERA5は現状取得のみで計算不可。\n\n"
+            "【地図】\nネット接続不要の緯度経度図です。地形・海岸線はありません。"
+        )
 
     def plot_results(self):
         initial = self.last_run or (Path(self.v["root"].get()) / "runs")
