@@ -16,7 +16,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
 from .core import (JST, automatic_model_top, execute_groups, expand_observations,
-                   group_starts, load_starts_csv, write_group)
+                   group_starts, load_starts_csv, write_group,
+                   validate_time_controls)
 from .era5 import download_cds, download_google_arco
 from .native_era5 import convert_cds_grib1_to_arl
 from .arco_convert import convert_arco_netcdf_to_arl
@@ -59,6 +60,8 @@ class App(tk.Tk):
             "executable": str(detected_executable), "root": str(work_root),
             "csv": "", "distance_km": "0", "time_shift_minutes": "0",
             "hours": "48", "height_ref": "MSL",
+            "output_interval_minutes": "10",
+            "integration_step_minutes": "0",
             "workers": "2", "max_points": "100",
             "provider": next(iter(PROVIDERS)), "local_met": "",
         }
@@ -67,6 +70,7 @@ class App(tk.Tk):
             option.flag: tk.BooleanVar(value=(option.flag in DEFAULT_MET_VARIABLES))
             for option in MET_VARIABLES
         }
+        self.show_advanced_timestep = tk.BooleanVar(value=False)
         self._widgets()
         self.after(100, self._poll)
 
@@ -123,11 +127,30 @@ class App(tk.Tk):
 
         run_settings = self._group(setup_content, "後方流跡線の計算条件")
         self._entry(run_settings, "何時間前まで遡るか [h]", "hours", 0)
-        ttk.Label(run_settings, text="CSVの高度の基準").grid(row=1, column=0, sticky="w", padx=5)
+        self._entry(run_settings, "流跡線の出力間隔 [分]（標準10分）",
+                    "output_interval_minutes", 1)
+        ttk.Label(run_settings, text="CSVの高度の基準").grid(row=2, column=0, sticky="w", padx=5)
         ttk.Combobox(run_settings, textvariable=self.v["height_ref"], values=["AGL", "MSL"],
-                     state="readonly", width=10).grid(row=1, column=1, sticky="w", padx=5)
-        self._entry(run_settings, "同時に動かす計算プロセス数 (1～32)", "workers", 2)
-        self._entry(run_settings, "1実行当たり最大開始点数", "max_points", 3)
+                     state="readonly", width=10).grid(row=2, column=1, sticky="w", padx=5)
+        self._entry(run_settings, "同時に動かす計算プロセス数 (1～32)", "workers", 3)
+        self._entry(run_settings, "1実行当たり最大開始点数", "max_points", 4)
+        ttk.Checkbutton(
+            run_settings, text="詳細設定：計算時間刻みを固定する",
+            variable=self.show_advanced_timestep,
+            command=self._toggle_advanced_time,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=5, pady=4)
+        self.advanced_time_frame = ttk.Frame(run_settings)
+        self.advanced_time_frame.grid(row=6, column=0, columnspan=3, sticky="ew")
+        self.advanced_time_frame.grid_remove()
+        self._entry(
+            self.advanced_time_frame, "計算時間刻み DELT [分] (0=自動)",
+            "integration_step_minutes", 0,
+        )
+        ttk.Label(
+            self.advanced_time_frame,
+            text="通常は自動（0）のまま。固定値は60分と出力間隔を割り切る整数のみ。",
+            foreground="#855000",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=5)
 
         extras = self._group(setup_content, "流跡線上に出力する気象変数")
         ttk.Label(
@@ -201,6 +224,14 @@ class App(tk.Tk):
             )
 
 
+    def _toggle_advanced_time(self):
+        if self.show_advanced_timestep.get():
+            self.advanced_time_frame.grid()
+        else:
+            self.advanced_time_frame.grid_remove()
+            # Hiding the advanced override restores the safe automatic step.
+            self.v["integration_step_minutes"].set("0")
+
     def _pick_executable(self):
         value = filedialog.askopenfilename(title="hyts_std.exe", filetypes=[("EXE", "*.exe"), ("All files", "*.*")])
         if value:
@@ -240,6 +271,12 @@ class App(tk.Tk):
             bases, float(conf["distance_km"]), float(conf["time_shift_minutes"]))
         groups = group_starts(points, max_points=int(conf["max_points"]))
         back_hours = int(conf["hours"])
+        tout, delt = validate_time_controls(
+            conf["output_interval_minutes"],
+            conf["integration_step_minutes"],
+        )
+        conf["output_interval_minutes"] = str(tout)
+        conf["integration_step_minutes"] = str(delt)
         if back_hours <= 0 or back_hours > 9999:
             raise ValueError("後方計算時間は1～9999時間で指定してください。")
         # HYSPLIT CONTROL *requires* a vertical model-top value. Keep it
@@ -268,6 +305,13 @@ class App(tk.Tk):
             conf, points, groups, earliest, latest, provider, bbox = self._data()
             self._log(f"プレビュー: CSV {len(load_starts_csv(Path(conf['csv']))):,}行 → "
                       f"{len(points):,}本 / {len(groups):,}回実行")
+            tout = int(conf["output_interval_minutes"])
+            estimate = len(points) * (int(conf["hours"]) * 60 // tout + 1)
+            self._log(
+                f"出力間隔: {tout}分 / 計算刻み: "
+                f"{'自動' if conf['integration_step_minutes'] == '0' else conf['integration_step_minutes'] + '分（固定）'}"
+                f" / 推定CSV地点数: 約{estimate:,}行"
+            )
             chosen = selected_variables(conf["met_diagnostics"])
             self._log(
                 "出力する気象変数: 気圧・地表標高（常時）" +
@@ -383,7 +427,9 @@ class App(tk.Tk):
                 folders = [write_group(g, run_root, met_paths, int(conf["hours"]),
                                        float(conf["internal_model_top_m_agl"]),
                                        conf["height_ref"], bdyfiles,
-                                        diagnostics=conf["met_diagnostics"])
+                                        diagnostics=conf["met_diagnostics"],
+                                        output_interval_minutes=int(conf["output_interval_minutes"]),
+                                        integration_step_minutes=int(conf["integration_step_minutes"]))
                            for g in groups]
                 self._notify(f"Prepared {len(folders)} runs in {run_root}")
                 results = execute_groups(Path(conf["executable"]), folders,
@@ -398,6 +444,11 @@ class App(tk.Tk):
                     run_root, height_reference=conf["height_ref"],
                     group_folders=folders,
                     selected_diagnostics=conf["met_diagnostics"],
+                )
+                metadata["output_interval_minutes"] = int(conf["output_interval_minutes"])
+                metadata["integration_step_minutes"] = int(conf["integration_step_minutes"])
+                metadata["integration_step_control"] = (
+                    "automatic" if conf["integration_step_minutes"] == "0" else "fixed"
                 )
                 metadata["results_csv"] = exported.path.name
                 metadata["meteorological_output"] = [
@@ -454,6 +505,9 @@ class App(tk.Tk):
             "斜めも中心から5kmです。\n\n"
             "【観測時刻の前後】\n"
             "0分は観測時刻のみ。30分は前30分・観測時刻・後30分の3通り。\n\n"
+            "【出力間隔と計算時間刻み】\n流跡線を保存する間隔は標準10分です。"
+            "後方24時間・10分間隔なら通常145地点を出力します。\n"
+            "計算時間刻みは通常DELT=0で自動設定します。詳細設定でのみ固定値を使用できます。\n\n"
             "【後方計算時間】\nCSVの時刻から何時間過去へ遡るか。\n\n"
             "【モデル上端】\nHYSPLIT内部で自動設定するため入力は不要です。"
             "20,000m AGL以上、またはCSV最大高度+1,000m以上を確保します。\n\n"
