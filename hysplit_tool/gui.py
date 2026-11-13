@@ -22,12 +22,15 @@ from .era5 import download_cds, download_google_arco
 from .native_era5 import convert_cds_grib1_to_arl
 from .arco_convert import convert_arco_netcdf_to_arl
 from .plot import create_map
-from .platform_guard import require_native_windows
+from .platform_guard import require_native_windows, prevent_automatic_system_sleep
 from .validation import check_coverage
-from .meteo import download_noaa, local_arl_files, plan_archives
+from .meteo import plan_archive_windows
 from .met_diagnostics import MET_VARIABLES, DEFAULT_MET_VARIABLES, selected_variables
 from .portable import default_work_root, find_hysplit_executable
 from .csv_export import export_run_csv
+from .time_windows import TimeWindow, find_window, windows_for_starts
+from .batch_meteorology import preparation_count, prepare_meteorology
+from .progress import TaskProgress
 
 PROVIDERS = {
     "GDAS1 (1°)": "gdas1",
@@ -185,7 +188,8 @@ class App(tk.Tk):
             "ERA5 Google ARCO：0.25°×0.25°格子。NetCDF→GRIB1→ARL変換（Windows、試験的）。",
             "grib2arl.exeとfiledates.exeはHYSPLITの実行フォルダから自動検出します。",
             "出力：全流跡線を1つのtrajectories.csvに集約。別途オフライン図とGeoJSONも保存。",
-            "取得には大量のディスク容量・通信量が必要です。観測期間+後方計算期間を対象にします。",
+            "観測日時ごとに必要な後方計算期間を求め、重なる期間のみ統合して取得します。",
+            "長時間処理中も進捗を表示します。完了まではアプリを閉じず、PCを手動でスリープさせないでください。",
         ]:
             ttk.Label(notes, text="• " + line, wraplength=820, justify="left").pack(anchor="w", pady=2)
 
@@ -208,6 +212,24 @@ class App(tk.Tk):
         scrollbar = ttk.Scrollbar(frame, command=self.log.yview)
         scrollbar.pack(side="right", fill="y")
         self.log.configure(yscrollcommand=scrollbar.set)
+
+        meter_frame = ttk.Frame(self)
+        meter_frame.pack(fill="x", padx=14, pady=(0, 10))
+        self.progress_status_var = tk.StringVar(value="待機中")
+        ttk.Label(meter_frame, textvariable=self.progress_status_var).pack(anchor="w")
+        ttk.Label(meter_frame, text="全体：完了した処理数", foreground="#465d71").pack(anchor="w")
+        self.progress_bar = ttk.Progressbar(
+            meter_frame, orient="horizontal", mode="determinate", maximum=100,
+        )
+        self.progress_bar.pack(fill="x", pady=(2, 4))
+        ttk.Label(meter_frame, text="現在の処理（容量が分かる場合は転送割合）",
+                  foreground="#465d71").pack(anchor="w")
+        self.file_progress_bar = ttk.Progressbar(
+            meter_frame, orient="horizontal", mode="indeterminate", maximum=100,
+        )
+        self.file_progress_bar.pack(fill="x", pady=(2, 0))
+        self._file_bar_spinning = False
+
         self._log("観測CSVの時刻はJSTとして読み取ります。内部でUTCへ変換します。")
         detected_executable = Path(self.v["executable"].get())
         if not detected_executable.is_file():
@@ -316,11 +338,21 @@ class App(tk.Tk):
                 "出力する気象変数: 気圧・地表標高（常時）" +
                 ("、" + "、".join(item.japanese_label for item in chosen) if chosen else "")
             )
-            self._log(f"必要気象期間(JST): {earliest.astimezone(JST):%Y-%m-%d %H:%M} ～ "
-                      f"{latest.astimezone(JST):%Y-%m-%d %H:%M}")
+            windows = windows_for_starts(
+                (g.when for g in groups), int(conf["hours"])
+            )
+            self._log(
+                f"必要気象期間: {len(windows)}個の独立した期間"
+                "（間の空白日時は取得しません）"
+            )
+            for i, window in enumerate(windows, 1):
+                self._log(
+                    f"  {i}: {window.start.astimezone(JST):%Y-%m-%d %H:%M} ～ "
+                    f"{window.end.astimezone(JST):%Y-%m-%d %H:%M} JST"
+                )
             if provider in ("gdas1", "gfs0p25"):
-                plan = plan_archives(provider, earliest, latest)
-                self._log(f"NOAA {provider}: {len(plan)} ファイル取得・キャッシュ利用予定: " +
+                plan = plan_archive_windows(provider, windows)
+                self._log(f"NOAA {provider}: {len(plan)} 個の固有ファイル取得・キャッシュ利用予定: " +
                           ", ".join(p.name for p in plan[:8]) + (" ..." if len(plan) > 8 else ""))
                 self._log(
                     "NOAAは公開S3を優先し、転送状況と速度をログに表示します。"
@@ -360,6 +392,9 @@ class App(tk.Tk):
             messagebox.showerror("入力エラー", str(exc))
             return
         self.busy = True
+        self.progress_status_var.set("計算準備中")
+        self.progress_bar["value"] = 0
+        self._set_file_progress(False)
         for button in self.buttons:
             button.configure(state="disabled")
         threading.Thread(target=self._background, args=(action, data), daemon=True).start()
@@ -367,51 +402,92 @@ class App(tk.Tk):
     def _notify(self, message):
         self.events.put(("log", message))
 
+    def _progress_event(self, event: dict[str, object]) -> None:
+        self.events.put(("progress", event))
+
+    def _set_file_progress(self, active: bool, part: float | None = None):
+        if self._file_bar_spinning:
+            self.file_progress_bar.stop()
+            self._file_bar_spinning = False
+        if not active:
+            self.file_progress_bar.configure(mode="determinate")
+            self.file_progress_bar["value"] = 0
+        elif part is None:
+            self.file_progress_bar.configure(mode="indeterminate")
+            self.file_progress_bar.start(60)
+            self._file_bar_spinning = True
+        else:
+            self.file_progress_bar.configure(mode="determinate")
+            self.file_progress_bar["value"] = max(0, min(100, 100 * part))
+
+    def _apply_progress(self, status: dict[str, object]) -> None:
+        done, total = int(status["done"]), int(status["total"])
+        self.progress_bar["value"] = 100.0 * done / total
+        self.progress_status_var.set(
+            f"処理 {done}/{total}：{status['label']}"
+        )
+        self._set_file_progress(
+            bool(status["active"]), status.get("part")
+        )
+
     def _background(self, action, data):
+        with prevent_automatic_system_sleep():
+            self._background_active(action, data)
+
+    def _background_active(self, action, data):
         try:
             conf, points, groups, earliest, latest, provider, bbox = data
             root = Path(conf["root"]).expanduser().resolve()
             root.mkdir(parents=True, exist_ok=True)
             met_dir = root / "met" / provider
-            if provider in ("gdas1", "gfs0p25"):
-                met_paths = download_noaa(provider, earliest, latest, met_dir, notify=self._notify)
-            elif provider == "local":
-                met_paths = local_arl_files(conf["local_met"])
-                self._notify(f"Local ARL: {len(met_paths)} files selected")
-            elif provider == "era5_cds":
-                results = download_cds(earliest, latest, met_dir, bbox, notify=self._notify)
-                self._notify(f"ERA5 GRIB downloaded: {len(results)} files")
-                if action == "run":
-                    met_paths = convert_cds_grib1_to_arl(
-                        results, met_dir / "arl", earliest, latest,
-                        hysplit_executable=Path(conf["executable"]), notify=self._notify)
-                    self._notify(f"ERA5 ARL conversion complete: {len(met_paths)} files")
-                else:
-                    met_paths = results
-                    self._notify("ERA5 CDS: download complete. ARL conversion requires a "
-                                 "separately installed Windows HYSPLIT and runs with 一括計算.")
-            elif provider == "arco_era5":
-                result = download_google_arco(earliest, latest, met_dir, bbox, notify=self._notify)
-                self._notify(f"ARCO ERA5 NetCDF ready: {result}")
-                if action == "run":
-                    met_paths = convert_arco_netcdf_to_arl(
-                        result, met_dir / "arl", earliest, latest,
-                        hysplit_executable=Path(conf["executable"]), notify=self._notify)
-                    self._notify(f"ARCO NetCDF -> ARL complete: {len(met_paths)} files")
-                else:
-                    met_paths = [result]
-                    self._notify("ERA5 Google ARCO: NetCDF download complete. "
-                                 "Run 一括計算 for native Windows GRIB1/ARL conversion.")
-            else:
-                raise ValueError(f"Unsupported meteo source: {provider}")
+            windows = windows_for_starts(
+                (g.when for g in groups), int(conf["hours"])
+            )
+            progress = TaskProgress(
+                preparation_count(provider, windows, action=action)
+                + (len(windows) + len(groups) + 2 if action == "run" else 0),
+                send=self._progress_event,
+            )
+            self._notify(
+                f"Required meteorology: {len(windows)} separate UTC time windows "
+                "(unused gaps are not downloaded)"
+            )
+            for i, window in enumerate(windows, 1):
+                self._notify(
+                    f"Period {i}/{len(windows)} JST: "
+                    f"{window.start.astimezone(JST):%Y-%m-%d %H:%M} - "
+                    f"{window.end.astimezone(JST):%Y-%m-%d %H:%M}"
+                )
+            prepared = prepare_meteorology(
+                provider, windows, met_dir, bbox, action=action,
+                local_met=conf["local_met"],
+                hysplit_executable=Path(conf["executable"]),
+                notify=self._notify,
+                progress=progress,
+            )
+            met_paths = list(prepared.files)
             if action == "run":
                 filedates = Path(conf["executable"]).resolve().parent / "filedates.exe"
-                coverage = check_coverage(met_paths, earliest, latest, filedates)
-                for message in coverage.messages:
-                    self._notify("Meteorology: " + message)
-                if provider in ("era5_cds", "arco_era5") and not coverage.verified:
-                    raise RuntimeError("ERA5 must pass ARL time coverage validation before running")
-                run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid.uuid4().hex[:6]
+                reports = []
+                for i, window in enumerate(windows, 1):
+                    progress.start(
+                        f"気象データ時刻の検証 {i}/{len(windows)}"
+                    )
+                    report = check_coverage(
+                        list(prepared.for_window(window)),
+                        window.start, window.end, filedates,
+                    )
+                    for message in report.messages:
+                        self._notify(
+                            f"Meteorology {i}/{len(windows)}: " + message
+                        )
+                    if provider in ("era5_cds", "arco_era5") and not report.verified:
+                        raise RuntimeError(
+                            f"ERA5 period {i}: native ARL time coverage unverified"
+                        )
+                    reports.append(report)
+                    progress.complete(f"気象データ時刻検証 {i}/{len(windows)} 完了")
+                run_id = datetime.now(JST).strftime("%Y%m%dT%H%M%SJST") + "_" + uuid.uuid4().hex[:6]
                 run_root = root / "runs" / run_id
                 run_root.mkdir(parents=True, exist_ok=False)
                 # Keep the exact source observation CSV for scientific provenance.
@@ -422,9 +498,29 @@ class App(tk.Tk):
                             "observation_csv_sha256": hashlib.sha256(observation_bytes).hexdigest(),
                             "start_count": len(points), "execution_count": len(groups),
                             "utc_bounds": [earliest.isoformat(), latest.isoformat()],
-                            "arl_times_verified": coverage.verified,
-                            "arl_times_first": coverage.first.isoformat() if coverage.first else None,
-                            "arl_times_last": coverage.last.isoformat() if coverage.last else None,
+                            "run_id_timezone": "JST (UTC+09:00)",
+                            "group_id_timezone": "JST (UTC+09:00)",
+                            "required_windows_utc": [
+                                [w.start.isoformat(), w.end.isoformat()]
+                                for w in windows
+                            ],
+                            "required_windows_jst": [
+                                [w.start.astimezone(JST).isoformat(),
+                                 w.end.astimezone(JST).isoformat()]
+                                for w in windows
+                            ],
+                            "meteorology_by_window": [
+                                {"window_utc": [w.start.isoformat(), w.end.isoformat()],
+                                 "files": [str(path) for path in prepared.for_window(w)]}
+                                for w in windows
+                            ],
+                            "arl_times_verified": all(r.verified for r in reports),
+                            "arl_times_first": min(
+                                (r.first for r in reports if r.first), default=None
+                            ).isoformat() if any(r.first for r in reports) else None,
+                            "arl_times_last": max(
+                                (r.last for r in reports if r.last), default=None
+                            ).isoformat() if any(r.last for r in reports) else None,
                             "warning": "Time checks do not verify ARL grid extent, vertical fields or physical correctness."}
                 (run_root / "manifest.json").write_text(
                     json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -437,26 +533,45 @@ class App(tk.Tk):
                         f"HYSPLIT bdyfiles が見つかりません: {bdyfiles}. "
                         "HYSPLITの正式なインストールフォルダ内の hyts_std.exe を指定してください。"
                     )
-                folders = [write_group(g, run_root, met_paths, int(conf["hours"]),
-                                       float(conf["internal_model_top_m_agl"]),
-                                       conf["height_ref"], bdyfiles,
-                                        diagnostics=conf["met_diagnostics"],
-                                        output_interval_minutes=int(conf["output_interval_minutes"]),
-                                        integration_step_minutes=int(conf["integration_step_minutes"]))
-                           for g in groups]
+                folders = [
+                    write_group(
+                        g, run_root,
+                        list(prepared.for_window(
+                            find_window(windows, g.when, int(conf["hours"]))
+                        )),
+                        int(conf["hours"]),
+                        float(conf["internal_model_top_m_agl"]),
+                        conf["height_ref"], bdyfiles,
+                        diagnostics=conf["met_diagnostics"],
+                        output_interval_minutes=int(conf["output_interval_minutes"]),
+                        integration_step_minutes=int(conf["integration_step_minutes"]),
+                    )
+                    for g in groups
+                ]
                 self._notify(f"Prepared {len(folders)} runs in {run_root}")
-                results = execute_groups(Path(conf["executable"]), folders,
-                                         int(conf["workers"]), notify=self._notify)
+                progress.start(f"HYSPLITの後方流跡線計算 0/{len(folders)}")
+                results = execute_groups(
+                    Path(conf["executable"]), folders, int(conf["workers"]),
+                    notify=self._notify,
+                    progress=lambda completed, total: progress.complete(
+                        f"HYSPLIT流跡線 {completed}/{total} グループ完了"
+                    ),
+                )
                 failures = sum(not success for _, success in results)
                 if failures:
                     raise RuntimeError(
                         f"{failures} HYSPLIT runs failed. See per-group MESSAGE/run.log; "
                         "no complete batch CSV was written."
                     )
+                progress.start("全流跡線を統合CSVへ集約中")
                 exported = export_run_csv(
                     run_root, height_reference=conf["height_ref"],
                     group_folders=folders,
                     selected_diagnostics=conf["met_diagnostics"],
+                )
+                progress.complete(
+                    f"統合CSV完成：{exported.trajectories}流跡線、"
+                    f"{exported.endpoints}地点"
                 )
                 metadata["output_interval_minutes"] = int(conf["output_interval_minutes"])
                 metadata["integration_step_minutes"] = int(conf["integration_step_minutes"])
@@ -492,12 +607,15 @@ class App(tk.Tk):
                     f"{exported.missing_terrain_endpoints} rows missing terrain elevation"
                 )
                 self._notify(f"FINISHED: {len(results)} groups successful. Output: {run_root}")
+                progress.start("オフライン地図とGeoJSONを作成中")
                 try:
                     page, geojson, shown, total = create_map(
                         run_root)
                     self._notify(f"Map: {page} / GeoJSON: {geojson} ({shown}/{total} trajectories)")
+                    progress.complete("地図・GeoJSON作成完了")
                 except (FileNotFoundError, ValueError, OSError) as exc:
                     self._notify(f"Map not generated: {exc}")
+                    progress.complete("地図の生成はスキップ（CSVは完成）")
                 self.events.put(("done", str(run_root)))
             else:
                 self.events.put(("done", None))
@@ -558,8 +676,15 @@ class App(tk.Tk):
                 event, payload = self.events.get_nowait()
                 if event == "log":
                     self._log(payload)
+                elif event == "progress":
+                    self._apply_progress(payload)
                 elif event in ("done", "error"):
                     self.busy = False
+                    self._set_file_progress(False)
+                    if event == "error":
+                        self.progress_status_var.set("処理失敗：" + str(payload)[:150])
+                    else:
+                        self.progress_status_var.set("完了")
                     for button in self.buttons:
                         button.configure(state="normal")
                     if event == "done":

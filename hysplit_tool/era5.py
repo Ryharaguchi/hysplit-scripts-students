@@ -52,6 +52,32 @@ def _month_days(earliest: datetime, latest: datetime):
     return dict(sorted(dates.items()))
 
 
+def _month_day_hours(earliest: datetime, latest: datetime):
+    """CDS request days and hourly slots, including temporal interpolation.
+
+    CDS accepts lists of days and times (cross-product). This avoids all 24
+    hours for brief windows, without requesting unused days between launches.
+    """
+    if latest < earliest:
+        raise ValueError("ERA5 request ends before it starts")
+    slots: dict[tuple[int, int], dict[str, set[str]]] = defaultdict(
+        lambda: {"days": set(), "hours": set()}
+    )
+    first = (earliest - timedelta(hours=1)).replace(
+        minute=0, second=0, microsecond=0
+    )
+    last = (latest + timedelta(hours=1)).replace(
+        minute=0, second=0, microsecond=0
+    )
+    when = first
+    while when <= last:
+        item = slots[(when.year, when.month)]
+        item["days"].add(f"{when.day:02d}")
+        item["hours"].add(f"{when.hour:02d}:00")
+        when += timedelta(hours=1)
+    return dict(sorted(slots.items()))
+
+
 def download_cds(earliest: datetime, latest: datetime, target_dir: Path,
                  bbox: tuple[float, float, float, float],
                  notify: Callable[[str], None] | None = None) -> list[Path]:
@@ -62,27 +88,43 @@ def download_cds(earliest: datetime, latest: datetime, target_dir: Path,
         raise RuntimeError("ERA5 CDS requires: pip install -r requirements-era5.txt and ~/.cdsapirc") from exc
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    client = cdsapi.Client()
+    client = None
     result = []
-    # Add a 1-day buffer, which also accommodates a number of boundary files.
-    for (year, month), days in _month_days(earliest - timedelta(days=1), latest + timedelta(days=1)).items():
+    for (year, month), selection in _month_day_hours(earliest, latest).items():
+        days = sorted(selection["days"])
+        hours = sorted(selection["hours"])
         for variant, dataset, fields in (
             ("pressure", "reanalysis-era5-pressure-levels", PRESSURE_FIELDS),
             ("single", "reanalysis-era5-single-levels", SURFACE_FIELDS),
         ):
             stamp = f"{min(days)}-{max(days)}"
             region_id = hashlib.sha256(repr(tuple(bbox)).encode("ascii")).hexdigest()[:8]
-            target = target_dir / f"era5_{variant}_{year}{month:02d}_{stamp}_{region_id}.grib"
+            # Legacy cached GRIBs contained every hour of the selected days,
+            # so they cover a narrower hourly request without re-downloading.
+            old_target = target_dir / f"era5_{variant}_{year}{month:02d}_{stamp}_{region_id}.grib"
+            if old_target.is_file() and old_target.stat().st_size > 0:
+                result.append(old_target)
+                if notify:
+                    notify(f"ERA5 CDS: reusing existing all-hour cache {old_target.name}")
+                continue
+            times_key = hashlib.sha256(
+                repr((tuple(days), tuple(hours))).encode("ascii")
+            ).hexdigest()[:10]
+            target = target_dir / (
+                f"era5_{variant}_{year}{month:02d}_{stamp}_{times_key}_{region_id}.grib"
+            )
             if target.is_file() and target.stat().st_size > 0:
                 result.append(target)
+                if notify:
+                    notify(f"ERA5 CDS: reusing sparse cache {target.name}")
                 continue
             request = {
                 "product_type": ["reanalysis"],
                 "variable": fields,
                 "year": [str(year)],
                 "month": [f"{month:02d}"],
-                "day": sorted(days),
-                "time": [f"{hour:02d}:00" for hour in range(24)],
+                "day": days,
+                "time": hours,
                 "data_format": "grib",
                 "download_format": "unarchived",
                 "area": list(bbox),  # north, west, south, east
@@ -91,9 +133,14 @@ def download_cds(earliest: datetime, latest: datetime, target_dir: Path,
             if variant == "pressure":
                 request["pressure_level"] = PRESSURE_LEVELS
             if notify:
-                notify(f"ERA5 CDS: {dataset} {year}-{month:02d} ({len(days)} days)")
+                notify(
+                    f"ERA5 CDS: {dataset} {year}-{month:02d} "
+                    f"({len(days)} days x {len(hours)} UTC hours)"
+                )
             temp = target.with_suffix(".part")
             try:
+                if client is None:
+                    client = cdsapi.Client()
                 client.retrieve(dataset, request, str(temp))
                 if not temp.is_file() or temp.stat().st_size == 0:
                     raise RuntimeError(f"CDS did not create GRIB: {temp}")
