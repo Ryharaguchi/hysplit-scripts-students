@@ -76,25 +76,14 @@
 12. 別PCで失敗するときは、HYSPLIT正規インストール、CDS認証、
     HTTPSプロキシや信頼CA証明書、書込権限、空き容量を確認してください。
 
-13. Google Driveへの計算結果コピー:
-    H:にマイドライブがある場合、結果コピー先の初期値はHYSPLITです。
-    必要ならGUIからH:\マイドライブ\HYSPLIT等を指定してください。
-    計算終了後に runs フォルダへ
-    trajectories.csv、tdump、計算ログ、地図などをコピーします。
-    GDAS/GFS/ERA5気象ファイルやNOAA HYSPLIT本体はコピーしません。
-    計算・気象データ取得は必ずローカルで実行されます。
-    コピーが失敗してもローカルの計算結果は残ります。
-    Google Drive側のクラウド同期完了はGoogle Driveアプリで確認してください。
-    コピー先はGUIから変更できます。
-
-14. 同じ利用者の別PCへ移行する場合:
+13. 同じ利用者の別PCへ移行する場合:
     H:\マイドライブ\配布 以下のHYSPLIT_BatchとHYSPLITを
     デスクトップへセットでコピーしてください。モデル計算と気象
     ダウンロードはデスクトップ\HYSPLIT_Workで行います。
     HYSPLIT本体についてはNOAAの利用条件を遵守し、第三者への
     再配布や共有リンクでの配布を行わないでください。
 
-15. HYSPLITとGUIを同じ利用者のPC間で移す場合は、
+14. HYSPLITとGUIを同じ利用者のPC間で移す場合は、
     配布フォルダ全体を別PCのデスクトップへコピーしてください。
     HYSPLIT_Batch.exeを単独で抜き出さず、_internalと隣接する
     HYSPLIT/exec、HYSPLIT/bdyfilesも保持してください。

@@ -37,19 +37,18 @@ class TestPortablePaths(unittest.TestCase):
                  patch.object(portable.sys, "executable", str(exe)):
                 self.assertEqual(application_dir(), exe.resolve().parent)
 
-    def test_gui_defaults_to_desktop_and_available_drive(self):
+    def test_gui_defaults_to_local_desktop_without_cloud_copy(self):
         from hysplit_tool.gui import App
         from hysplit_tool import portable
         with tempfile.TemporaryDirectory() as td:
             with patch.object(portable, "windows_desktop_dir", return_value=Path(td)), \
-                 patch("hysplit_tool.gui.default_work_root", return_value=Path(td)/"HYSPLIT_Work"), \
-                 patch("hysplit_tool.gui.suggested_drive_results_root", return_value="H:/マイドライブ/HYSPLIT"):
+                 patch("hysplit_tool.gui.default_work_root", return_value=Path(td)/"HYSPLIT_Work"):
                 gui = App()
                 gui.withdraw()
                 try:
                     self.assertEqual(Path(gui.v["root"].get()),
                                      Path(td) / "HYSPLIT_Work")
-                    self.assertEqual(gui.v["cloud_copy_root"].get(), "H:/マイドライブ/HYSPLIT")
+                    self.assertNotIn("cloud_copy_root", gui.v)
                 finally:
                     gui.destroy()
 
