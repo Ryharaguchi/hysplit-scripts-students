@@ -23,10 +23,11 @@ class TestPortablePaths(unittest.TestCase):
                 self.assertEqual(find_hysplit_executable(), exe)
                 self.assertIn(exe, hysplit_candidates())
 
-    def test_uses_per_user_localappdata_instead_of_d_drive(self):
+    def test_default_work_root_uses_local_desktop_not_google_drive(self):
+        from hysplit_tool import portable
         with tempfile.TemporaryDirectory() as td:
-            with patch.dict("os.environ", {"LOCALAPPDATA": td}):
-                self.assertEqual(default_work_root(), Path(td) / "HYSPLIT_Batch")
+            with patch.object(portable, "windows_desktop_dir", return_value=Path(td)):
+                self.assertEqual(default_work_root(), Path(td) / "HYSPLIT_Work")
 
     def test_application_dir_uses_frozen_exe_parent(self):
         import hysplit_tool.portable as portable
@@ -36,15 +37,19 @@ class TestPortablePaths(unittest.TestCase):
                  patch.object(portable.sys, "executable", str(exe)):
                 self.assertEqual(application_dir(), exe.resolve().parent)
 
-    def test_gui_config_is_independent_of_hardcoded_codex_drive(self):
+    def test_gui_defaults_to_desktop_and_available_drive(self):
         from hysplit_tool.gui import App
+        from hysplit_tool import portable
         with tempfile.TemporaryDirectory() as td:
-            with patch.dict("os.environ", {"LOCALAPPDATA": td}):
+            with patch.object(portable, "windows_desktop_dir", return_value=Path(td)), \
+                 patch("hysplit_tool.gui.default_work_root", return_value=Path(td)/"HYSPLIT_Work"), \
+                 patch("hysplit_tool.gui.suggested_drive_results_root", return_value="H:/マイドライブ/HYSPLIT"):
                 gui = App()
                 gui.withdraw()
                 try:
                     self.assertEqual(Path(gui.v["root"].get()),
-                                     Path(td) / "HYSPLIT_Batch")
+                                     Path(td) / "HYSPLIT_Work")
+                    self.assertEqual(gui.v["cloud_copy_root"].get(), "H:/マイドライブ/HYSPLIT")
                 finally:
                     gui.destroy()
 

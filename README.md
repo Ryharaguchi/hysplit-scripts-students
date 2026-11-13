@@ -3,13 +3,35 @@
 **Windowsネイティブ専用。WSL/WSL2・Linux・macOSは実行対象外です。**
 計算者が作成した観測CSVから、各行の時刻・緯度・経度・高度を開始条件として、HYSPLITの後方流跡線を大量に計算するTkinter GUIです。NOAA READYのWeb上で数値計算を実行するものではありません。
 
+## Google DriveのHYSPLIT結果保存先（Windows H:）
+
+計算・気象データの作業先は各PCのデスクトップ/HYSPLIT_Workです。Google DriveがH:に接続されている場合、結果コピー先の既定値は H:/マイドライブ/HYSPLIT です。既定で無効化する変更は行いません。GUIで保存先はいつでも変更できます。
+
+具体的には、1つの統合 trajectories.csv、観測CSVの原本 observations.csv、manifest.json、各グループのCONTROL/SETUP.CFG/tdump/MESSAGE/run.log、オフライン地図とGeoJSONをコピーします。成果物はSHA-256を使って照合し、途中で失敗した場合には完成したフォルダと誤認させないよう一時フォルダから確定します。ファイル名が同じ既存の結果を上書きしません。
+
+**気象データの取得とHYSPLIT計算はローカルで実行**します。大きなGDAS/GFS/ERA5気象ファイルとモデル本体はGoogle Driveへ自動コピーしません。Google Driveの仮想ドライブはクラウドとの同期や空き容量によって読み書きが遅くなるため、計算処理はローカルに置いたままにしています。
+
+Google Driveが利用できない場合や容量不足の場合は、ローカルの結果を消さずにGUIへコピー失敗の警告を表示します。コピー先欄を空欄にすれば同期を無効化でき、別のGoogle Driveアカウントがある場合は「参照」で任意のフォルダへ変更できます。**H:が見つからないPCで勝手にG:へフォールバックはしません。** G:とH:が異なるGoogle Driveアカウントの可能性があるためです。
+
+WindowsのGoogle Driveフォルダへの書き込みが成功したことと、Googleのサーバーへのクラウド同期が完了したことは同義ではありません。Google Drive for desktopで同期完了を確認してください。
+
+### 同じ利用者の別PCへの持ち運び
+
+H:/マイドライブ/配布 の直下にはGUIの HYSPLIT_Batch とモデルの HYSPLIT を並べます。GUIのHYSPLIT_Batch.exeは隣接するHYSPLIT/exec/hyts_std.exe、grib2arl.exe、filedates.exeとbdyfilesを自動検出します。
+
+別PCでは「配布」フォルダ全体をデスクトップにコピーし、配布/HYSPLIT_Batch/HYSPLIT_Batch.exe を起動します。作業・気象データの保存先はデスクトップの HYSPLIT_Work です。日本語の「配布」などを含むパスは、HYSPLITのFortran用ASCII設定に対して必要な小さな地形ファイルを作業フォルダへコピーし、相対パスで参照します。日本語フォルダ名の変更は不要です。
+
+これは同じ利用者のPC間での移動を目的とするもので、第三者への再配布・公開共有リンクを意図していません。[NOAA HYSPLIT利用規約](https://hysplit2.arl.noaa.gov/HYSPLIT_agreement.php)に従ってご利用ください。
+
+このPCのプライベートな別PC用フォルダはH:/マイドライブ/配布です。アプリ本体に加え、同じ利用者が手元で使用しているHYSPLITの実行ファイル群とbdyfilesを配置し、別PCのデスクトップにフォルダごとコピーして使用します。これは第三者への再配布を意図していません。NOAAの利用条件に従い第三者には共有しないでください。
+
 ## Windows EXE配布版（Pythonインストール不要）
 
 Windows x64では、ポータブル配布フォルダの HYSPLIT_Batch.exe をダブルクリックすればGUIを起動できます。実行先のPCにはPython・Git・PowerShell・WSLは不要です。EXEファイルだけを取り出さず、配布フォルダの _internal も保持してください。
 
-**NOAA HYSPLITモデル本体は同梱しません。** [NOAA利用規約](https://hysplit2.arl.noaa.gov/HYSPLIT_agreement.php)では許可なきモデルソフトウェアの再配布は禁止されています。各PCで[公式Windows版](https://www.arl.noaa.gov/hysplit/getrun-hysplit/)を別途入手・導入してください。標準の C:/hysplit/exec/hyts_std.exe または HYSPLIT_HOME/HYSPLIT_EXE の指定先を自動検出します。見つからない場合はGUIで参照してください。HYSPLITの bdyfiles、grib2arl.exe、filedates.exe も必要です。
+**HYSPLIT_Batch.exe単体の配布ZIPにはモデル本体を同梱しません。** 同じ利用者のPC間移動用に作成する H:/マイドライブ/配布 フォルダでは、HYSPLIT_Batch と、現在このPCに導入済みのHYSPLIT実行ファイル一式およびbdyfilesを兄弟フォルダとして配置します。アプリは隣接するHYSPLIT/exec/hyts_std.exeを自動検出します。[NOAA利用規約](https://hysplit2.arl.noaa.gov/HYSPLIT_agreement.php)には無許可の再配布の禁止が明記されています。個人間の受け渡しや共有リンク公開は行わないでください。
 
-デフォルトの保存先は %LOCALAPPDATA%/HYSPLIT_Batch です。Dドライブや開発者アカウントには依存しません。観測CSVはJST入力、実行ごとの結果CSVは trajectories.csv に集約します。ERA5 Google ARCO用のxarray、netCDF4、ecCodes、gcsfsはEXEに含めますが、気象データの取得にはネット接続が必要です。
+デフォルトの計算・気象データ保存先はWindowsのデスクトップ/HYSPLIT_Workです。Dドライブや開発者アカウントには依存しません。観測CSVはJST入力、実行ごとの結果CSVは trajectories.csv に集約します。ERA5 Google ARCO用のxarray、netCDF4、ecCodes、gcsfsはEXEに含めますが、気象データの取得にはネット接続が必要です。
 
 診断: HYSPLIT_Batch.exe --self-test diagnostics.json
 
@@ -24,7 +46,7 @@ cd D:\Codex\hysplit-scripts-students
 py -3 run_gui.py
 ```
 
-NOAA HYSPLIT Windows版の`hyts_std.exe`が必要です。既存の`Desktop\backwardtrajectory\HYSPLIT\exec`を自動検出します。作業フォルダの初期値は`D:\Codex\hysplit-batch`です。元のHYSPLITフォルダ、既存の観測データ・出力データは書き換えません。
+NOAA HYSPLIT Windows版の`hyts_std.exe`が必要です。既存の`Desktop\backwardtrajectory\HYSPLIT\exec`を自動検出します。過去のソース実行例での作業フォルダは`D:\Codex\hysplit-batch`です。元のHYSPLITフォルダ、既存の観測データ・出力データは書き換えません。
 
 ## ダウンロード速度・別PCでの通信エラー
 
