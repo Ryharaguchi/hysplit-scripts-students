@@ -1,4 +1,4 @@
-﻿"""Regression: private transfer folder may contain Japanese path components.
+"""Regression: private transfer folder may contain Japanese path components.
 
 NOAA's FORTRAN ASCDATA.CFG accepts only ASCII paths; tests ensure that the
 required small terrain tables are copied beside the run and referred to
@@ -51,7 +51,7 @@ class TestUnicodeHysplitPath(unittest.TestCase):
             folder=write_group(self._group(),dest,[root/"fake.arl"],
                                2,20000,"AGL",bdy)
             contents=(folder/"ASCDATA.CFG").read_text(encoding="ascii")
-            self.assertIn(bdy.as_posix().rstrip("/")+"/",contents)
+            self.assertIn(bdy.resolve().as_posix().rstrip("/")+"/",contents)
             self.assertFalse((folder/"bdyfiles").exists())
 
 
