@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 import subprocess
 import shutil
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -519,7 +519,10 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
         raise ValueError("Height reference must be AGL or MSL")
     tout, delt = validate_time_controls(output_interval_minutes,
                                         integration_step_minutes)
-    folder = Path(run_root) / f"{group.when:%Y%m%dT%H%MZ}_{group.ordinal:05d}"
+    folder = Path(run_root) / (
+        group.when.astimezone(JST).strftime("%Y%m%dT%H%MJST")
+        + f"_{group.ordinal:05d}"
+    )
     folder.mkdir(parents=True, exist_ok=False)
     (folder / "CONTROL").write_text(render_control(group, met_paths, back_hours, model_top_m), encoding="ascii")
     # KMSL sets how CONTROL starting heights are interpreted.
@@ -576,7 +579,8 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
 
 
 def execute_groups(executable: Path, folders: list[Path], workers: int = 2,
-                   notify: Callable[[str], None] | None = None) -> list[tuple[Path, bool]]:
+                   notify: Callable[[str], None] | None = None,
+                   progress: Callable[[int, int], None] | None = None) -> list[tuple[Path, bool]]:
     require_native_windows()
     executable = Path(executable).resolve()
     if not executable.is_file():
@@ -600,5 +604,14 @@ def execute_groups(executable: Path, folders: list[Path], workers: int = 2,
             notify(f"{'OK' if success else 'FAILED'}: {folder.name} (see run.log and MESSAGE)")
         return folder, success
 
+    # Report actual completions, not submission order: a slow first job must
+    # not make progress appear frozen while later groups finish.
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(run, folders))
+        futures = [pool.submit(run, folder) for folder in folders]
+        completed: dict[Path, bool] = {}
+        for i, future in enumerate(as_completed(futures), start=1):
+            folder, success = future.result()
+            completed[folder] = success
+            if progress:
+                progress(i, len(folders))
+        return [(folder, completed[folder]) for folder in folders]

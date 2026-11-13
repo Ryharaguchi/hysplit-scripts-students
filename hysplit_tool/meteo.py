@@ -13,7 +13,9 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
+
+from .time_windows import TimeWindow
 
 BASE = "https://www.ready.noaa.gov/data/archives"
 S3_BASE = "https://noaa-oar-arl-hysplit-pds.s3.amazonaws.com"
@@ -67,6 +69,17 @@ def plan_archives(source: str, earliest: datetime, latest: datetime) -> list[Rem
     return list(files.values())
 
 
+def plan_archive_windows(
+    source: str, windows: Iterable[TimeWindow],
+) -> list[RemoteFile]:
+    """Deduplicate NOAA weekly/daily ARL files for disjoint trajectory windows."""
+    files: dict[str, RemoteFile] = {}
+    for window in sorted(windows):
+        for entry in plan_archives(source, window.start, window.end):
+            files.setdefault(entry.name, entry)
+    return list(files.values())
+
+
 def _download_error_hint(error: Exception) -> str:
     """Actionable diagnostics without weakening TLS verification."""
     message = str(error)
@@ -111,6 +124,7 @@ def download_arl_file(
     opener=None,
     *,
     max_retries: int = MAX_RETRIES,
+    progress: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     """Download via S3/READY with HTTP Range resume, retries and live progress.
 
@@ -125,6 +139,9 @@ def download_arl_file(
         check_signature(target)
         if notify:
             notify(f"CACHED {target.name} ({target.stat().st_size / MIB:.1f} MiB)")
+        if progress:
+            size = target.stat().st_size
+            progress(size, size)
         return target
     if max_retries < 1 or max_retries > 10:
         raise ValueError("max_retries must be between 1 and 10")
@@ -210,6 +227,8 @@ def download_arl_file(
                                 f"NOAA file {spec.name}: {expected_total / MIB:.1f} MiB, "
                                 f"free disk {free / MIB:.0f} MiB"
                             )
+                    if progress:
+                        progress(existing if append else 0, expected_total)
                     metadata.write_text(json.dumps({
                         "url": url,
                         "etag": get_header("ETag") or (saved.get("etag") if append else None),
@@ -242,6 +261,8 @@ def download_arl_file(
                                     + f" ({fraction}), {rate:.2f} MiB/s"
                                 )
                                 progress_at = now
+                                if progress:
+                                    progress(done, expected_total)
                     actual = partial.stat().st_size
                     if not actual or (expected_total is not None and actual != expected_total):
                         raise OSError(
@@ -251,6 +272,8 @@ def download_arl_file(
                     check_signature(partial)
                     os.replace(partial, target)
                     metadata.unlink(missing_ok=True)
+                    if progress:
+                        progress(actual, expected_total or actual)
                     if notify:
                         notify(f"DOWNLOADED {target.name}: {actual / MIB:.1f} MiB")
                     return target
@@ -271,13 +294,40 @@ def download_arl_file(
     )
 
 
+def download_noaa_windows(
+    source: str, windows: Iterable[TimeWindow], target_dir: Path,
+    notify: Callable[[str], None] | None = None,
+    progress: Callable[[int, int, float | None, str], None] | None = None,
+) -> list[Path]:
+    """Fetch each *distinct* required NOAA archive once, skipping empty gaps."""
+    plan = plan_archive_windows(source, windows)
+    if notify:
+        notify(
+            f"NOAA {source}: {len(plan)} unique ARL files for disjoint periods; "
+            "cached files are reused"
+        )
+    files = []
+    for index, item in enumerate(plan):
+        if progress:
+            progress(index, len(plan), 0.0, item.name)
+
+        def on_bytes(done: int, total: int | None, *,
+                     _index: int = index, _name: str = item.name) -> None:
+            if progress:
+                fraction = (min(1.0, done / total) if total else None)
+                progress(_index, len(plan), fraction, _name)
+
+        files.append(download_arl_file(item, target_dir, notify, progress=on_bytes))
+        if progress:
+            progress(index + 1, len(plan), 1.0, item.name)
+    return files
+
+
 def download_noaa(source: str, earliest: datetime, latest: datetime, target_dir: Path,
                   notify: Callable[[str], None] | None = None) -> list[Path]:
-    plan = plan_archives(source, earliest, latest)
-    if notify:
-        notify(f"NOAA {source}: {len(plan)} ARL files; large downloads possible")
-    # NOAA recommends <=2 simultaneous FTP connections; one sequential HTTPS download.
-    return [download_arl_file(item, target_dir, notify) for item in plan]
+    """Backwards-compatible single-interval downloader."""
+    return download_noaa_windows(source, (TimeWindow(earliest, latest),),
+                                 target_dir, notify)
 
 
 def local_arl_files(spec: str) -> list[Path]:
