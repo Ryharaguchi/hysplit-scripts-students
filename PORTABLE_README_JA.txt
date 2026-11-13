@@ -112,3 +112,12 @@
     途中で中断した場合も検証済みの部分NetCDFから再開できます。
     ただし通信量が大きい問題自体は残ります。
     数日間の地域データにはERA5 CDS（認証が必要）も検討してください。
+
+20. 他PCでcffi/_pycparserとzlib: incorrect header checkが出た場合:
+    NetCDF破損と決め付けず、EXEと_internalをセットで
+    ローカルのデスクトップにコピーし直してください。
+    配布EXEの --self-test diagnostics.json では、
+    grib1_backend.ok と packaging_passed を確認できます。
+    この診断ではecCodesの本物のGRIB1メッセージも生成します。
+    コピー元Google Driveの同期終了を確認してください。
+    観測CSVや計算済みデータを削除する必要はありません。

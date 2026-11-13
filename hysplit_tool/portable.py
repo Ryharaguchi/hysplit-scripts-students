@@ -106,6 +106,38 @@ _REQUIRED_PACKAGES = (
 )
 
 
+def verify_frozen_grib_backend() -> dict[str, object]:
+    """Exercise actual ecCodes/CFFI/pycparser dynamic imports in a frozen EXE.
+
+    Merely importing the eccodes top-level package is insufficient; GRIB1
+    creation is the path used by ARCO NetCDF conversion and loads CFFI's
+    fallback pycparser module out of the PyInstaller PYZ archive.
+    """
+    import cffi
+    import pycparser
+    import eccodes
+
+    parser = pycparser.CParser()
+    parser.parse("typedef unsigned int hysplit_test_type;")
+    ffi = cffi.FFI()
+    ffi.cdef("typedef unsigned int hysplit_test_type;")
+    sample = eccodes.codes_grib_new_from_samples("regular_ll_sfc_grib1")
+    if sample is None:
+        raise RuntimeError("ecCodes GRIB1 sample could not be loaded")
+    try:
+        message = bytes(eccodes.codes_get_message(sample))
+    finally:
+        eccodes.codes_release(sample)
+    if not message.startswith(b"GRIB") or message[7] != 1:
+        raise RuntimeError("ecCodes GRIB1 sample returned invalid message")
+    return {
+        "ok": True,
+        "cffi_version": getattr(cffi, "__version__", "unknown"),
+        "pycparser_version": getattr(pycparser, "__version__", "unknown"),
+        "grib1_sample_bytes": len(message),
+    }
+
+
 def standalone_diagnostics(report_path: Path) -> bool:
     """Check the distribution without executing a model or accessing network.
 
@@ -128,6 +160,22 @@ def standalone_diagnostics(report_path: Path) -> bool:
                 "error": f"{type(exc).__name__}: {exc}",
             }
             issues.append(f"{name}: {exc}")
+
+    # Verify the precise native GRIB backend used *after* NetCDF acquisition.
+    # This catches broken/missing modules in a transferred onedir distribution.
+    backend = {"ok": False, "skipped": True}
+    if "eccodes" in _REQUIRED_PACKAGES:
+        try:
+            backend = verify_frozen_grib_backend()
+        except Exception as exc:
+            backend = {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            issues.append(
+                "ecCodes/CFFI/pycparser GRIB1 conversion backend: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     gui_ok = False
     try:
@@ -154,6 +202,7 @@ def standalone_diagnostics(report_path: Path) -> bool:
         "hysplit_bdyfiles_found": bdy.is_dir(),
         "gui_loaded": gui_ok,
         "libraries": packages,
+        "grib1_backend": backend,
         "packaging_passed": not issues,
         "errors": issues,
         "hysplit_note": "Install NOAA HYSPLIT separately on each PC; it is not redistributed.",
