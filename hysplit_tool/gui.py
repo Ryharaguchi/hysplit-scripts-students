@@ -27,6 +27,7 @@ from .validation import check_coverage
 from .meteo import download_noaa, local_arl_files, plan_archives
 from .met_diagnostics import MET_VARIABLES, DEFAULT_MET_VARIABLES, selected_variables
 from .portable import default_work_root, find_hysplit_executable
+from .drive_results import suggested_drive_results_root, copy_completed_run
 from .csv_export import export_run_csv
 
 PROVIDERS = {
@@ -58,6 +59,7 @@ class App(tk.Tk):
         work_root = default_work_root()
         defaults = {
             "executable": str(detected_executable), "root": str(work_root),
+            "cloud_copy_root": suggested_drive_results_root(),
             "csv": "", "distance_km": "0", "time_shift_minutes": "0",
             "hours": "48", "height_ref": "MSL",
             "output_interval_minutes": "10",
@@ -110,6 +112,15 @@ class App(tk.Tk):
         loc = self._group(setup_content, "HYSPLIT と保存先")
         self._entry(loc, "HYSPLIT実行ファイル (.exe)", "executable", 0, 65, self._pick_executable)
         self._entry(loc, "作業・データ保存フォルダ", "root", 1, 65, self._pick_root)
+        self._entry(
+            loc, "Google Driveへの結果コピー先（空欄で無効）",
+            "cloud_copy_root", 2, 65, self._pick_cloud_copy_root,
+        )
+        ttk.Label(
+            loc,
+            text="計算・気象データ取得はローカル。計算成功後、結果フォルダだけをH:のマイドライブへコピーします。",
+            foreground="#495b6c",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", padx=5)
 
         bases = self._group(setup_content, "観測CSV（JST）")
         self._entry(bases, "CSV（時刻, 緯度, 経度, 高度m）", "csv", 0, 65, self._pick_csv)
@@ -242,6 +253,14 @@ class App(tk.Tk):
         if value:
             self.v["root"].set(value)
 
+    def _pick_cloud_copy_root(self):
+        value = filedialog.askdirectory(
+            title="Google DriveのHYSPLIT結果コピー先",
+            initialdir=self.v["cloud_copy_root"].get() or "H:/マイドライブ",
+        )
+        if value:
+            self.v["cloud_copy_root"].set(value)
+
     def _pick_csv(self):
         value = filedialog.askopenfilename(title="開始点CSV", filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
         if value:
@@ -317,6 +336,11 @@ class App(tk.Tk):
                 "出力する気象変数: 気圧・地表標高（常時）" +
                 ("、" + "、".join(item.japanese_label for item in chosen) if chosen else "")
             )
+            if conf.get("cloud_copy_root"):
+                self._log(
+                    f"完成した計算結果は {conf['cloud_copy_root']}/runs にもコピーします。"
+                    "気象データやHYSPLIT本体はコピーしません。"
+                )
             self._log(f"必要気象期間(JST): {earliest.astimezone(JST):%Y-%m-%d %H:%M} ～ "
                       f"{latest.astimezone(JST):%Y-%m-%d %H:%M}")
             if provider in ("gdas1", "gfs0p25"):
@@ -499,6 +523,34 @@ class App(tk.Tk):
                     self._notify(f"Map: {page} / GeoJSON: {geojson} ({shown}/{total} trajectories)")
                 except (FileNotFoundError, ValueError, OSError) as exc:
                     self._notify(f"Map not generated: {exc}")
+                drive_path = conf.get("cloud_copy_root", "").strip()
+                if drive_path:
+                    metadata["google_drive_copy"] = {
+                        "destination": str(Path(drive_path) / "runs" / run_root.name),
+                        "status": "completed",
+                        "contents": "run folder; excludes downloaded ARL, NetCDF and HYSPLIT",
+                        "cloud_sync_status": "not checked (verify with Google Drive)",
+                    }
+                    (run_root / "manifest.json").write_text(
+                        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    try:
+                        copy_completed_run(run_root, Path(drive_path), self._notify)
+                    except (OSError, ValueError) as exc:
+                        # Model has already succeeded: do not misreport that
+                        # trajectory computation failed because Drive is offline.
+                        metadata["google_drive_copy"]["status"] = "failed"
+                        metadata["google_drive_copy"]["error"] = str(exc)
+                        (run_root / "manifest.json").write_text(
+                            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                        self._notify(
+                            f"Google Driveへのコピー失敗: {exc}. "
+                            f"計算結果はローカルに残っています: {run_root}"
+                        )
+                        self.events.put(("copy_error", str(exc)))
                 self.events.put(("done", str(run_root)))
             else:
                 self.events.put(("done", None))
@@ -531,6 +583,9 @@ class App(tk.Tk):
             "混合層高度をチェックで選択します。\n"
             "気圧・地表標高は常時出力します。\n"
             "比湿は湿潤空気1kg当たり、水蒸気混合比は乾燥空気1kg当たりのg/kgです。\n\n"
+            "【Google Driveへの結果コピー】\n計算成功後に結果フォルダ全体を"
+            "H:のマイドライブへコピーします。気象データの取得とモデル計算は"
+            "ローカルで行います。H:が利用できない場合はローカルの結果を残します。\n\n"
             "【出力】\n一括計算ごとにtrajectories.csvに全軌跡を集約。"
             "標高、AGL高度、推定MSL高度、推定ジオポテンシャル高度を別列で出力。\n\n"
             "【データソース】\n"
@@ -559,6 +614,13 @@ class App(tk.Tk):
                 event, payload = self.events.get_nowait()
                 if event == "log":
                     self._log(payload)
+                elif event == "copy_error":
+                    messagebox.showwarning(
+                        "Google Driveへの結果コピー失敗",
+                        str(payload)
+                        + "\n\n計算そのものは成功しています。"
+                          "ローカルのrunsフォルダから結果を確認してください。",
+                    )
                 elif event in ("done", "error"):
                     self.busy = False
                     for button in self.buttons:

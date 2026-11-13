@@ -3,6 +3,20 @@
 **Windowsネイティブ専用。WSL/WSL2・Linux・macOSは実行対象外です。**
 計算者が作成した観測CSVから、各行の時刻・緯度・経度・高度を開始条件として、HYSPLITの後方流跡線を大量に計算するTkinter GUIです。NOAA READYのWeb上で数値計算を実行するものではありません。
 
+## Google DriveのHYSPLIT結果保存先（Windows H:）
+
+Windowsで「H:\マイドライブ」がマウントされている場合、GUIの「Google Driveへの結果コピー先」の既定値を **H:\マイドライブ\HYSPLIT** にします。計算が成功したあとに各実行フォルダを、HYSPLIT/runs/実行ID へ自動的にコピーします。
+
+具体的には、1つの統合 trajectories.csv、観測CSVの原本 observations.csv、manifest.json、各グループのCONTROL/SETUP.CFG/tdump/MESSAGE/run.log、オフライン地図とGeoJSONをコピーします。成果物はSHA-256を使って照合し、途中で失敗した場合には完成したフォルダと誤認させないよう一時フォルダから確定します。ファイル名が同じ既存の結果を上書きしません。
+
+**気象データの取得とHYSPLIT計算はローカルで実行**します。大きなGDAS/GFS/ERA5気象ファイルとモデル本体はGoogle Driveへ自動コピーしません。Google Driveの仮想ドライブはクラウドとの同期や空き容量によって読み書きが遅くなるため、計算処理はローカルに置いたままにしています。
+
+Google Driveが利用できない場合や容量不足の場合は、ローカルの結果を消さずにGUIへコピー失敗の警告を表示します。コピー先欄を空欄にすれば同期を無効化でき、別のGoogle Driveアカウントがある場合は「参照」で任意のフォルダへ変更できます。**H:が見つからないPCで勝手にG:へフォールバックはしません。** G:とH:が異なるGoogle Driveアカウントの可能性があるためです。
+
+WindowsのGoogle Driveフォルダへの書き込みが成功したことと、Googleのサーバーへのクラウド同期が完了したことは同義ではありません。Google Drive for desktopで同期完了を確認してください。
+
+配布用ZIPはこのPCでHYSPLIT/releases/HYSPLIT_Batch_Windows_x64.zipにも保存します。ZIPを展開した別PCで起動するには、従来どおりNOAAのHYSPLIT本体を公式にインストールしてください。
+
 ## Windows EXE配布版（Pythonインストール不要）
 
 Windows x64では、ポータブル配布フォルダの HYSPLIT_Batch.exe をダブルクリックすればGUIを起動できます。実行先のPCにはPython・Git・PowerShell・WSLは不要です。EXEファイルだけを取り出さず、配布フォルダの _internal も保持してください。
