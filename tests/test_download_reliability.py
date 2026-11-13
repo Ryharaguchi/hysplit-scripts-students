@@ -1,5 +1,7 @@
 """Test public S3 precedence, retry, resume and GUI download-only paths offline."""
 import io
+import importlib.util
+import os
 import json
 import tempfile
 import unittest
@@ -107,6 +109,13 @@ class TestPortableNoaaDownload(unittest.TestCase):
         self.assertIn("Do not disable",hint)
 
 
+@unittest.skipUnless(
+    os.name == "nt" and all(
+        importlib.util.find_spec(name) is not None
+        for name in ("xarray", "netCDF4", "numpy")
+    ),
+    "Optional Windows ERA5 xarray/netCDF4/numpy dependencies unavailable",
+)
 class TestArcoCache(unittest.TestCase):
     def test_second_acquisition_reuses_netcdf_without_opening_remote_zarr(self):
         import xarray as xr
