@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import csv
+import io
 import math
 import re
+import unicodedata
+from decimal import Decimal, InvalidOperation
 import subprocess
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -136,9 +139,41 @@ def parse_jst(value: str) -> datetime:
     start times to minute precision, so seconds round to the nearest minute
     (>=30 seconds rounds up). Keep the original CSV for reproducibility.
     """
-    original = value.strip()
+    original = unicodedata.normalize("NFKC", str(value)).strip()
     if not original:
         raise ValueError("JST observation time is blank")
+    # Excel may serialize date/time cells as days since 1899-12-30.
+    # Accept serials only in the HYSPLIT-supported year range; never confuse
+    # a 12/14-digit compact timestamp with an Excel day number.
+    if re.fullmatch(r"\d{4,5}(?:\.\d+)?", original):
+        try:
+            serial = Decimal(original)
+        except InvalidOperation as exc:
+            raise ValueError(f"Invalid Excel date serial: {original}") from exc
+        if Decimal("25569") <= serial <= Decimal("73050"):
+            excel = datetime(1899, 12, 30) + timedelta(days=float(serial))
+            when = excel.replace(tzinfo=JST).astimezone(UTC)
+            return (when + timedelta(seconds=30)).replace(
+                second=0, microsecond=0
+            )
+    # Excel may append .0 to a compact integer when saving numeric cells.
+    if re.fullmatch(r"\d{12}(?:\.0+)?|\d{14}(?:\.0+)?", original):
+        original = original.split(".", 1)[0]
+    # Excel's Japanese date display may be written to a CSV or TSV export.
+    original = re.sub(
+        r"^(\d{4})年(\d{1,2})月(\d{1,2})日",
+        lambda m: f"{m[1]}/{m[2]}/{m[3]}", original,
+    )
+    original = re.sub(
+        r"\s+(\d{1,2})時(\d{1,2})分(?:(\d{1,2})秒)?$",
+        lambda m: f" {int(m[1]):02}:{int(m[2]):02}"
+                  + (f":{int(m[3]):02}" if m[3] else ""), original,
+    )
+    if re.fullmatch(r"\d+(?:\.\d+)?[eE][+-]?\d+", original):
+        raise ValueError(
+            f"Excel converted the observation date to scientific notation: {original}. "
+            "Save the first column as text before editing the CSV."
+        )
     explicit = None
     suffix = re.search(r"\s+(JST|UTC)$", original, flags=re.IGNORECASE)
     if suffix:
@@ -155,6 +190,13 @@ def parse_jst(value: str) -> datetime:
                 lambda m: f"{int(m[1]):04}-{int(m[2]):02}-{int(m[3]):02}",
                 original,
             ).replace("Z", "+00:00")
+            # Excel usually writes the hour without a leading zero ("9:00");
+            # datetime.fromisoformat requires two digits for the hour.
+            value_iso = re.sub(
+                r"^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{1,2})",
+                lambda m: f"{m[1]} {int(m[2]):02}:{int(m[3]):02}",
+                value_iso,
+            )
             dt = datetime.fromisoformat(value_iso)
     except ValueError as exc:
         raise ValueError(
@@ -188,38 +230,114 @@ def _csv_header(row: list[str]) -> bool:
     return nonnumeric >= 2
 
 
-def load_starts_csv(path: Path) -> list[StartPoint]:
-    """Four columns in fixed order: time (JST), latitude, longitude, height m.
+def _csv_float(value: str, *, delimiter: str) -> float:
+    text = unicodedata.normalize("NFKC", value).strip()
+    # Values like "1,000" are valid when quoted in Excel CSV, and
+    # decimal commas are valid only when a different column separator is used.
+    if delimiter in (";", "\t") and "," in text and "." not in text:
+        # With semicolon or tab as the column separator, Excel typically
+        # uses commas as decimal separators (e.g., latitude "35,123").
+        text = text.replace(",", ".")
+    elif re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?", text):
+        text = text.replace(",", "")
+    return float(text)
 
-    Optional header of arbitrary column names; UTF-8 BOM or Windows CSV (CP932).
-    Every row creates one base trajectory. No column-name matching required.
+
+def _excel_csv_text(path: Path, raw: bytes) -> str:
+    """Decode Excel CSV/Unicode text, never accidentally parse XLSX as CSV."""
+    if raw.startswith(b"PK\x03\x04") or path.suffix.lower() in (".xlsx", ".xlsm", ".xls"):
+        raise ValueError(
+            f"{path.name} is an Excel workbook, not CSV. "
+            "In Excel use File > Save As > CSV UTF-8 (Comma delimited) (*.csv)."
+        )
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            return raw.decode("cp932")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                "CSV encoding unsupported; save from Excel as CSV UTF-8 (*.csv)"
+            ) from exc
+
+
+def _excel_csv_delimiter(lines: list[str]) -> tuple[str, int]:
+    """Detect comma, semicolon and tab exports without changing 4-column order."""
+    first = next((line for line in lines if line.strip()), "")
+    declaration = re.fullmatch(r"\s*sep\s*=\s*([,;\t])\s*", first, flags=re.I)
+    if declaration:
+        return declaration.group(1), next(
+            i for i, line in enumerate(lines) if line.strip()
+        ) + 1
+    text = "\n".join(line for line in lines if line.strip())[:8192]
+    try:
+        detected = csv.Sniffer().sniff(text, delimiters=",;\\t").delimiter
+        return detected, 0
+    except csv.Error:
+        pass
+    # File with only one data row or a complex quoted header.
+    for candidate in (",", ";", "\t"):
+        row = next(csv.reader([first], delimiter=candidate), [])
+        if len(row) >= 4:
+            return candidate, 0
+    return ",", 0
+
+
+def load_starts_csv(path: Path) -> list[StartPoint]:
+    """Read Excel-compatible observations by position: JST, lat, lon, altitude.
+
+    Headers are optional; UTF-8/CP932/UTF-16 and comma/semicolon/tab formats
+    are supported. Time-zone-aware timestamps override the JST default.
     """
     path = Path(path)
-    raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        text = raw.decode("cp932")
-    result = []
+    text = _excel_csv_text(path, path.read_bytes())
+    lines = text.splitlines()
+    delimiter, skip_to = _excel_csv_delimiter(lines)
+    contents = "\n".join(lines[skip_to:])
+    result: list[StartPoint] = []
     first_row = True
-    for row_number, row in enumerate(csv.reader(text.splitlines()), start=1):
-        if not row or all(not str(field).strip() for field in row):
-            continue
-        if first_row and _csv_header(row):
+    reader = csv.reader(io.StringIO(contents), delimiter=delimiter)
+    try:
+        for row in reader:
+            row_number = reader.line_num + skip_to
+            if not row or all(not str(field).strip() for field in row):
+                continue
+            # Excel can leave extra empty columns, even on the header row.
+            while len(row) > 4 and not row[-1].strip():
+                row.pop()
+            if first_row and _csv_header(row):
+                first_row = False
+                continue
             first_row = False
-            continue
-        first_row = False
-        if len(row) != 4:
-            raise ValueError(
-                f"CSV row {row_number}: expected four columns: time,latitude,longitude,height_m"
-            )
-        try:
-            result.append(StartPoint(
-                parse_jst(row[0]), float(row[1]), float(row[2]), float(row[3]),
-                f"csv:{row_number}",
-            ))
-        except (ValueError, TypeError) as exc:
-            raise ValueError(f"Invalid CSV row {row_number}: {exc}") from exc
+            if len(row) != 4:
+                raise ValueError(
+                    f"CSV row {row_number}: expected exactly four columns "
+                    "(time, latitude, longitude, height_m). "
+                    "In Excel save as CSV UTF-8 (*.csv), not XLSX. "
+                    f"Detected delimiter: {repr(delimiter)}; got {len(row)} columns."
+                )
+            try:
+                result.append(StartPoint(
+                    parse_jst(row[0]),
+                    _csv_float(row[1], delimiter=delimiter),
+                    _csv_float(row[2], delimiter=delimiter),
+                    _csv_float(row[3], delimiter=delimiter),
+                    f"csv:{row_number}",
+                ))
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"Invalid CSV row {row_number} ({path.name}): {exc}. "
+                    "Expected first four cells: JST date/time, latitude, "
+                    "longitude, height in metres."
+                ) from exc
+    except csv.Error as exc:
+        raise ValueError(
+            f"CSV syntax error around row {reader.line_num + skip_to}: {exc}"
+        ) from exc
     if not result:
         raise ValueError("CSV has no observation rows")
     if len(result) > 100_000:

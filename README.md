@@ -26,6 +26,31 @@ py -3 run_gui.py
 
 NOAA HYSPLIT Windows版の`hyts_std.exe`が必要です。既存の`Desktop\backwardtrajectory\HYSPLIT\exec`を自動検出します。作業フォルダの初期値は`D:\Codex\hysplit-batch`です。元のHYSPLITフォルダ、既存の観測データ・出力データは書き換えません。
 
+## ダウンロード速度・別PCでの通信エラー
+
+NOAAのデータ取得先は公開S3を優先し、READY Webアーカイブへフォールバックします。取得量と速度はGUIログに表示します。HTTP RangeとETag/Last-Modifiedが利用可能なら途中再開、通信切断やHTTP 429/5xxは最大3回再試行します。
+
+- GDAS1 1°：1週間分のアーカイブが約585 MB。計算対象が短くても週間ファイルを取得します。
+- GFS 0.25°：1日分が約3.1 GB。数日分の後方計算では10 GB以上になる場合があります。
+- Google ARCO ERA5 0.25°：公式の気圧面Zarrは1変数×1時間×37層のチャンクが公称154 MBで、小領域を切り出す場合も多量の通信が必要です。取得済みNetCDFはリモートZarrへ接続する前に検証・再利用します。
+- ERA5 CDS：データ要求の処理待ちとGRIB変換があります。別のWindowsユーザーでは各自の認証ファイル、CDSライセンス同意が必要です。Windowsのユーザーフォルダに .cdsapirc を用意してください。
+
+GUIの「気象データを取得」はGRIB/NetCDFのダウンロードのみで、ERA5もHYSPLIT本体を導入せず実行できます。「一括計算を開始」で変換とモデル計算まで行います。
+
+ダウンロードデータは設定した作業フォルダの met 配下に保存し、同じパスを再利用すると不要な取得を省けます。別PCにはキャッシュが自動共有されないため、許可された気象データを新しいPCの同じ作業フォルダにコピーする方法があります。NOAA HYSPLIT本体の再配布は禁止されています。
+
+別PCの接続エラーでは、GUIログのHTTPステータス・URL・エラー詳細を確認してください。HTTPSプロキシ、企業のTLS検査、Windowsの日時と信頼CA証明書、保存先の書込権限、空き容量などが要因になり得ます。SSL検証を無効化する回避策は使用しません。
+
+参考：[NOAA公開アーカイブ](https://www.ready.noaa.gov/archives.php) / [NOAA公開S3](https://noaa-oar-arl-hysplit-pds.s3.amazonaws.com/index.html) / [Google ARCO ERA5](https://github.com/google-research/arco-era5)
+
+## Excelで修正したCSVの互換性
+
+観測CSVは先頭4列を順序で読み込みます：日時(JST)、緯度、経度、高度[m]。ヘッダーは任意です。Excelで日時が 2026/10/10 9:00 のように1桁時刻になる場合に対応しました。日付シリアル値、UTF-8 BOM、CP932、UTF-16、タブ・セミコロン区切り、余分な末尾空列も読めます。
+
+推奨：Excelの「名前を付けて保存」→「CSV UTF-8（コンマ区切り）」で保存してください。日時の1列目を先に「文字列」に設定してから編集すると意図しない変換を減らせます。XLSXを拡張子だけCSVに変更してもCSVになりません。科学表記になった日時は桁が失われている可能性があり、計算せず明示的なエラーにします。
+
+エラー時は、GUIに表示されたCSV行番号と保存したCSVをテキストエディターで開いた内容を確認してください。読み込んだ元の観測CSVは計算フォルダの observations.csv へ原本保存します。
+
 ## 観測CSV（JST）
 
 CSVは**列の名前でなく順序で読み込み**ます。必須の4列は次の順です。

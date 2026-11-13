@@ -323,6 +323,10 @@ class App(tk.Tk):
                 plan = plan_archives(provider, earliest, latest)
                 self._log(f"NOAA {provider}: {len(plan)} ファイル取得・キャッシュ利用予定: " +
                           ", ".join(p.name for p in plan[:8]) + (" ..." if len(plan) > 8 else ""))
+                self._log(
+                    "NOAAは公開S3を優先し、転送状況と速度をログに表示します。"
+                    "取得済みの気象データは同じ保存先なら再利用します。"
+                )
                 if provider == "gfs0p25":
                     self._log("注意: GFS 0.25° は1日あたり約3GB以上（保存領域・帯域を確認）。")
             elif provider == "era5_cds":
@@ -340,7 +344,7 @@ class App(tk.Tk):
             return
         try:
             data = self._data()
-            if data[5] == "era5_cds":
+            if action == "run" and data[5] == "era5_cds":
                 exec_dir = Path(data[0]["executable"]).resolve().parent
                 missing = [name for name in ("grib2arl.exe", "filedates.exe")
                            if not (exec_dir / name).is_file()]
@@ -378,17 +382,27 @@ class App(tk.Tk):
             elif provider == "era5_cds":
                 results = download_cds(earliest, latest, met_dir, bbox, notify=self._notify)
                 self._notify(f"ERA5 GRIB downloaded: {len(results)} files")
-                met_paths = convert_cds_grib1_to_arl(
-                    results, met_dir / "arl", earliest, latest,
-                    hysplit_executable=Path(conf["executable"]), notify=self._notify)
-                self._notify(f"ERA5 ARL conversion complete: {len(met_paths)} files")
+                if action == "run":
+                    met_paths = convert_cds_grib1_to_arl(
+                        results, met_dir / "arl", earliest, latest,
+                        hysplit_executable=Path(conf["executable"]), notify=self._notify)
+                    self._notify(f"ERA5 ARL conversion complete: {len(met_paths)} files")
+                else:
+                    met_paths = results
+                    self._notify("ERA5 CDS: download complete. ARL conversion requires a "
+                                 "separately installed Windows HYSPLIT and runs with 一括計算.")
             elif provider == "arco_era5":
                 result = download_google_arco(earliest, latest, met_dir, bbox, notify=self._notify)
                 self._notify(f"ARCO ERA5 NetCDF ready: {result}")
-                met_paths = convert_arco_netcdf_to_arl(
-                    result, met_dir / "arl", earliest, latest,
-                    hysplit_executable=Path(conf["executable"]), notify=self._notify)
-                self._notify(f"ARCO NetCDF -> ARL complete: {len(met_paths)} files")
+                if action == "run":
+                    met_paths = convert_arco_netcdf_to_arl(
+                        result, met_dir / "arl", earliest, latest,
+                        hysplit_executable=Path(conf["executable"]), notify=self._notify)
+                    self._notify(f"ARCO NetCDF -> ARL complete: {len(met_paths)} files")
+                else:
+                    met_paths = [result]
+                    self._notify("ERA5 Google ARCO: NetCDF download complete. "
+                                 "Run 一括計算 for native Windows GRIB1/ARL conversion.")
             else:
                 raise ValueError(f"Unsupported meteo source: {provider}")
             if action == "run":

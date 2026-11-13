@@ -123,10 +123,45 @@ def download_google_arco(earliest: datetime, latest: datetime, target_dir: Path,
         raise ValueError("Google ARCO export capped at 14 days per request; split into smaller jobs")
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+    region_id = hashlib.sha256(repr(tuple(bbox)).encode("ascii")).hexdigest()[:8]
+    result = target_dir / f"arco_era5_{earliest:%Y%m%dT%H%M}_{latest:%Y%m%dT%H%M}_{region_id}.nc"
+    # Check the local cache *before* opening multi-petabyte remote Zarr.
+    # Opening the Zarr metadata can be slow or fail on another PC even when
+    # the entire requested NetCDF is already present on disk.
+    if result.is_file() and result.stat().st_size > 0:
+        try:
+            with xr.open_dataset(result, engine="netcdf4") as cached:
+                if not all(cached.sizes.get(c, 0) for c in ("time", "latitude", "longitude")):
+                    raise ValueError("No valid time/latitude/longitude in cached NetCDF")
+                expected_fields = set(ARCO_PRESSURE_FIELDS + ARCO_SURFACE_FIELDS)
+                if not expected_fields.issubset(cached.data_vars):
+                    raise ValueError("Missing required ERA5 fields in cached NetCDF")
+                if not any(x in cached.data_vars for x in ARCO_HUMIDITY_ALTERNATIVES):
+                    raise ValueError("Missing humidity in cached NetCDF")
+                if not (int(cached.sizes.get("level", 0)) >= len(ARCO_PRESSURE_LEVELS)):
+                    raise ValueError("Missing required pressure levels in cached NetCDF")
+            if notify:
+                notify(f"Reusing verified local ARCO NetCDF without network: {result.name}")
+            return result
+        except (OSError, ValueError, ImportError) as exc:
+            if notify:
+                notify(f"ARCO NetCDF cache is invalid ({exc}); downloading again")
+            result.unlink(missing_ok=True)
     if notify:
-        notify("Opening Google Cloud ARCO ERA5: a tiny spatial crop may still read very large Zarr chunks")
+        notify(
+            "Opening Google Cloud ARCO ERA5. The published pressure-field "
+            "Zarr chunks are approximately 154 MB per variable and hour "
+            "before geographic cropping; a short request can still read many GB."
+        )
     # Google's documented anonymous ARCO store.
-    ds = xr.open_zarr(ARCO_URL, storage_options={"token": "anon"}, chunks=None)
+    try:
+        ds = xr.open_zarr(ARCO_URL, storage_options={"token": "anon"}, chunks=None)
+    except Exception as exc:
+        raise RuntimeError(
+            "Cannot open public Google ARCO ERA5 Zarr. Check internet access, "
+            "HTTPS proxy/firewall, SSL certificates, and available disk space. "
+            f"Underlying error: {type(exc).__name__}: {exc}"
+        ) from exc
     # Dataset longitudes may be 0..360; use coordinate masks to handle 0-degree crossings.
     lon = ds.longitude
     if float(lon.min()) >= 0:
@@ -169,13 +204,6 @@ def download_google_arco(earliest: datetime, latest: datetime, target_dir: Path,
     if absent:
         raise ValueError(f"ARCO missing pressure levels: {absent}")
     selected = selection[required].sel(level=ARCO_PRESSURE_LEVELS)
-    region_id = hashlib.sha256(repr(tuple(bbox)).encode("ascii")).hexdigest()[:8]
-    result = target_dir / f"arco_era5_{earliest:%Y%m%dT%H%M}_{latest:%Y%m%dT%H%M}_{region_id}.nc"
-    if result.is_file() and result.stat().st_size:
-        ds.close()
-        if notify:
-            notify(f"Reusing ARCO NetCDF cache: {result.name}")
-        return result
     temp = result.with_suffix(".part")
     try:
         if notify:
