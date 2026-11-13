@@ -126,7 +126,11 @@ def prepare_meteorology(
             label = f"Google ARCO ERA5 {index}/{len(all_parts)}"
             progress.start(f"{label}: 地域NetCDFを取得中")
             netcdf = download_google_arco(
-                part.start, part.end, target_dir, bbox, notify=notify
+                part.start, part.end, target_dir, bbox, notify=notify,
+                progress=lambda current, total, _label=label: progress.fraction(
+                    f"{_label}: NetCDF書き出し {current}/{total} 時間",
+                    current / total if total else None,
+                ),
             )
             progress.complete(f"{label}: NetCDF取得完了")
             if action == "run":
