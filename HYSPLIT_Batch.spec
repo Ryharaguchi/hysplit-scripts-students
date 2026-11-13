@@ -16,13 +16,14 @@ hiddenimports = [
     "tkinter", "tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox",
     "numpy", "xarray", "xarray.backends.netCDF4_", "netCDF4",
     "eccodes", "gcsfs", "fsspec", "zarr", "numcodecs", "cdsapi",
+    "cffi", "cffi.cparser", "pycparser",
 ]
 
 # These packages are imported dynamically in meteorology adapters.
 # Include native DLLs and Zarr codec/provider registrations as well.
 for package in (
     "numpy", "eccodes", "netCDF4", "gcsfs", "fsspec",
-    "zarr", "numcodecs", "cdsapi",
+    "zarr", "numcodecs", "cdsapi", "cffi", "pycparser",
 ):
     data_files, dll_files, mods = collect_all(package)
     datas.extend(data_files)

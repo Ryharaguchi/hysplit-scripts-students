@@ -58,6 +58,20 @@ py -3 run_gui.py
 
 NOAA HYSPLIT Windows版の`hyts_std.exe`が必要です。既存の`Desktop\backwardtrajectory\HYSPLIT\exec`を自動検出します。過去のソース実行例での作業フォルダは`D:\Codex\hysplit-batch`です。元のHYSPLITフォルダ、既存の観測データ・出力データは書き換えません。
 
+## 別PCでのCFFI/pycparser・zlib展開エラーの調査
+
+エラーの例：Windows用GUIのERA5 NetCDF→GRIB1変換中にcffi/cparser.pyが内部モジュールを読み込もうとして、続いてzlib.error: incorrect header checkで停止する場合があります。
+
+CFFIが最初に試す内部の_pyparserが存在しないことだけで、NetCDF破損は確定しません。続くzlibエラーはPyInstaller内蔵Pythonモジュールの展開時に発生する可能性があります。
+
+同梱EXEの自己診断（--self-test）はトップレベルのライブラリ読み込みだけでなく、CFFIのC宣言パーサを実行し、ecCodesで実際のGRIB1サンプルメッセージを生成します。診断JSONのgrib1_backend.okとpackaging_passedがともにtrueなら、少なくともそのPCにあるEXEのGRIB1変換ライブラリは正常です。NetCDFデータの正しさやGoogleとの接続までは保証しません。
+
+別PCでは、既存アプリを終了し、Google Driveで同期が完了した最新版の「配布」フォルダ全体をWindowsローカルのデスクトップへコピーしてください。EXEと_internalを分離しないでください。その場所でPowerShellから次を実行します。
+
+    .\HYSPLIT_Batch.exe --self-test .\diagnostics.json
+
+異常時は同期が完了した配布元からフォルダ全体を置き換え、診断を再実行してください。観測CSV・計算済みデータの削除は不要です。自己診断が成功するまで大容量ERA5の再取得は避けてください。
+
 ## Google ARCO ERA5の長時間NetCDF書き出しと中断再開
 
 Google ARCOを選択した場合、元データは全球を1時間・1変数単位のZarrチャンクとして保持しています。公式仕様では気圧面の1チャンクは37層×全球格子で約154 MB（展開後の目安）です。地域を狭く切り出してもチャンク全体のダウンロード・展開が必要になり、複数日の流跡線解析は大量のデータ転送が発生します。地域指定だけではこの転送量は解消しません。

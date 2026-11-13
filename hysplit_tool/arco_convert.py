@@ -234,7 +234,28 @@ def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
                     surface_grib: Path,
                     notify: Callable[[str], None] | None = None) -> tuple[datetime, datetime]:
     """Convert a validated ERA5 ARCO NetCDF regional subset to two GRIB1 files."""
-    e, np, xr = _load_libraries()
+    # Distinguish a broken PyInstaller module archive from meteorological
+    # NetCDF corruption. The native backend loads CFFI/pycparser lazily.
+    try:
+        e, np, xr = _load_libraries()
+        from .portable import verify_frozen_grib_backend
+        import sys
+        if getattr(sys, "frozen", False):
+            verify_frozen_grib_backend()
+    except Exception as exc:
+        import zlib
+        if isinstance(exc, (ImportError, zlib.error)):
+            raise RuntimeError(
+                "ERA5 GRIB1 conversion backend could not be loaded from "
+                "the application bundle. The error occurred while importing "
+                "ecCodes/CFFI/pycparser, not while reading ERA5 NetCDF. "
+                "Close the app, replace the entire HYSPLIT_Batch folder "
+                "(EXE and _internal) with a fully downloaded verified copy "
+                "on the local Desktop, then run HYSPLIT_Batch.exe --self-test "
+                "to check grib1_backend. "
+                f"Original error: {type(exc).__name__}: {exc}"
+            ) from exc
+        raise
     netcdf = Path(netcdf)
     if not netcdf.is_file():
         raise FileNotFoundError(netcdf)
