@@ -1,4 +1,4 @@
-﻿"""Sparse-time HYSPLIT meteorology: offline planning and mocked acquisition.
+"""Sparse-time HYSPLIT meteorology: offline planning and mocked acquisition.
 
 No external network/CDS credentials needed. These tests prevent a regression
 to downloading every day between distant launches.
@@ -169,7 +169,7 @@ class TestSparseAcquisition(unittest.TestCase):
         windows=windows_for_starts([moment(3),moment(21)],3)
         tracker,_=self._progress(4)
         acquired=[]
-        def fake_download(start,end,target_dir,bbox,notify):
+        def fake_download(start,end,target_dir,bbox,notify,progress=None):
             acquired.append((start,end))
             return Path(target_dir)/f"era5_{start:%Y%m%d}.nc"
         with tempfile.TemporaryDirectory() as td, \

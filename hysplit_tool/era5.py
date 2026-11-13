@@ -153,7 +153,8 @@ def download_cds(earliest: datetime, latest: datetime, target_dir: Path,
 
 def download_google_arco(earliest: datetime, latest: datetime, target_dir: Path,
                          bbox: tuple[float, float, float, float],
-                         notify: Callable[[str], None] | None = None) -> Path:
+                         notify: Callable[[str], None] | None = None,
+                         progress: Callable[[int, int], None] | None = None) -> Path:
     """Export an ARL-convertible ARCO 0.25-degree NetCDF regional subset.
 
     Zarr chunks can be whole global fields despite small-area selection;
@@ -251,13 +252,25 @@ def download_google_arco(earliest: datetime, latest: datetime, target_dir: Path,
     if absent:
         raise ValueError(f"ARCO missing pressure levels: {absent}")
     selected = selection[required].sel(level=ARCO_PRESSURE_LEVELS)
-    temp = result.with_suffix(".part")
+    from .arco_stream import export_hourly_netcdf
+    pressure_variables = len(ARCO_PRESSURE_FIELDS) + 1  # humidity choice
+    hour_count = int(selected.sizes["time"])
+    estimated_raw_gib = (hour_count * pressure_variables * 154
+                         / 1024)
+    if notify:
+        notify(
+            f"Google ARCO: {hour_count} hourly records × "
+            f"{pressure_variables} pressure variables; upstream "
+            f"uncompressed global chunk workload ≈ {estimated_raw_gib:.1f} GiB "
+            "(not an estimate of actual compressed transfer)."
+        )
+        notify(
+            "Exporting ERA5 to NetCDF hour by hour; progress and "
+            "crash-safe resume checkpoints enabled. First hour may be slow."
+        )
     try:
-        if notify:
-            notify("Exporting 0.25-degree Google ARCO pressure/surface NetCDF for native ARL conversion")
-        selected.to_netcdf(temp, engine="netcdf4")
-        temp.replace(result)
+        return export_hourly_netcdf(
+            selected, result, source=ARCO_URL, notify=notify, progress=progress,
+        )
     finally:
-        temp.unlink(missing_ok=True)
         ds.close()
-    return result
