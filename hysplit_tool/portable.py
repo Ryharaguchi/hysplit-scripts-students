@@ -66,12 +66,38 @@ def find_hysplit_executable() -> Path:
     return Path(r"C:\hysplit\exec\hyts_std.exe")
 
 
+def windows_desktop_dir() -> Path:
+    """Resolve the Windows user's real Desktop, including OneDrive redirection.
+
+    Read Windows' per-user known-folder registry setting. The fallback is
+    USERPROFILE/Desktop if the registry is unavailable on this PC.
+    """
+    if os.name == "nt":
+        try:
+            import winreg
+
+            key_path = (
+                r"Software\Microsoft\Windows\CurrentVersion"
+                r"\Explorer\User Shell Folders"
+            )
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                desktop, _kind = winreg.QueryValueEx(key, "Desktop")
+            if desktop:
+                path = Path(os.path.expandvars(desktop)).expanduser()
+                if path.is_dir():
+                    return path
+        except (OSError, ValueError):
+            pass
+    return Path.home() / "Desktop"
+
+
 def default_work_root() -> Path:
-    """Writable local per-user directory without a D: drive assumption."""
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        return Path(local) / "HYSPLIT_Batch"
-    return Path.home() / "HYSPLIT_Batch"
+    """Run on the other PC's Desktop, never on a Google Drive virtual disk.
+
+    A portable distribution can live on H: for transfer, but HYSPLIT
+    calculations and multi-gigabyte meteorology caches belong on local disk.
+    """
+    return windows_desktop_dir() / "HYSPLIT_Work"
 
 
 _REQUIRED_PACKAGES = (

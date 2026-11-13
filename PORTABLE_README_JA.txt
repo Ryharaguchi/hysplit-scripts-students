@@ -8,10 +8,12 @@
 2. Python、WSL、PowerShell、Gitなどの開発環境は不要です。
    Windows 10/11 (64ビット) を想定しています。Windows以外には対応しません。
 
-3. 【重要】NOAAのHYSPLIT本体は含まれていません。
+3. GUI単体のZIPにはNOAAのHYSPLIT本体は含まれていません。
+   同じ利用者のPC間移動用H:の「配布」には
+   HYSPLIT_Batchの隣にHYSPLIT/execとbdyfilesを配置します。
    NOAA HYSPLIT利用規約により、許可のない再配布が禁止されています。
-   各PCでNOAA公式からWindows版を別途ダウンロード・導入し、
-   GUIの「HYSPLIT実行ファイル」でhyts_std.exeを指定してください。
+   「配布」を全体ごとデスクトップにコピーすると、GUIが隣の
+   HYSPLIT/exec/hyts_std.exeを自動検出します。
    通常は C:\hysplit\exec\hyts_std.exe です。
    正式なHYSPLITインストールには exec / bdyfiles 等のフォルダが必要です。
    HYSPLIT本体と気象ファイルの配布・コピーはNOAAの利用条件に従ってください。
@@ -22,7 +24,7 @@
    https://hysplit2.arl.noaa.gov/HYSPLIT_agreement.php
 
 4. データ出力先の初期値:
-   %LOCALAPPDATA%\HYSPLIT_Batch
+   Windowsデスクトップ\HYSPLIT_Work
    保存先はGUIから変更できます。D:ドライブは必須ではありません。
 
 5. samplesフォルダにJST時刻の観測CSVの例があります。
@@ -75,11 +77,26 @@
     HTTPSプロキシや信頼CA証明書、書込権限、空き容量を確認してください。
 
 13. Google Driveへの計算結果コピー:
-    H:\マイドライブ が接続されているPCでは既定のコピー先は
-    H:\マイドライブ\HYSPLIT です。計算終了後に runs フォルダへ
+    H:にマイドライブがある場合、結果コピー先の初期値はHYSPLITです。
+    必要ならGUIからH:\マイドライブ\HYSPLIT等を指定してください。
+    計算終了後に runs フォルダへ
     trajectories.csv、tdump、計算ログ、地図などをコピーします。
     GDAS/GFS/ERA5気象ファイルやNOAA HYSPLIT本体はコピーしません。
     計算・気象データ取得は必ずローカルで実行されます。
     コピーが失敗してもローカルの計算結果は残ります。
     Google Drive側のクラウド同期完了はGoogle Driveアプリで確認してください。
-    H:のないPCでは既定のコピー先は空欄です。参照で指定できます。
+    コピー先はGUIから変更できます。
+
+14. 同じ利用者の別PCへ移行する場合:
+    H:\マイドライブ\配布 以下のHYSPLIT_BatchとHYSPLITを
+    デスクトップへセットでコピーしてください。モデル計算と気象
+    ダウンロードはデスクトップ\HYSPLIT_Workで行います。
+    HYSPLIT本体についてはNOAAの利用条件を遵守し、第三者への
+    再配布や共有リンクでの配布を行わないでください。
+
+15. HYSPLITとGUIを同じ利用者のPC間で移す場合は、
+    配布フォルダ全体を別PCのデスクトップへコピーしてください。
+    HYSPLIT_Batch.exeを単独で抜き出さず、_internalと隣接する
+    HYSPLIT/exec、HYSPLIT/bdyfilesも保持してください。
+    日本語名「配布」を変更する必要はありません。
+    作業・気象データ保存先はデスクトップのHYSPLIT_Workです。

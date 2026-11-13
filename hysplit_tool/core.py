@@ -9,6 +9,7 @@ import re
 import unicodedata
 from decimal import Decimal, InvalidOperation
 import subprocess
+import shutil
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -543,9 +544,28 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
         bdy = Path(bdyfiles_dir).resolve()
         if not bdy.is_dir():
             raise FileNotFoundError(f"HYSPLIT bdyfiles folder not found: {bdy}")
+        bdy_path = bdy.as_posix().rstrip("/") + "/"
+        try:
+            bdy_path.encode("ascii")
+        except UnicodeEncodeError:
+            # Legacy HYSPLIT Fortran expects ASCII path strings in
+            # ASCDATA.CFG. A personal Windows directory named "配布" or
+            # "マイドライブ" cannot be encoded there. Place the three small
+            # 1-degree terrain tables beside this individual run and use a
+            # portable relative ASCII path instead of rejecting it.
+            local_bdy = folder / "bdyfiles"
+            local_bdy.mkdir()
+            for filename in ("LANDUSE.ASC", "ROUGLEN.ASC", "TERRAIN.ASC"):
+                src = bdy / filename
+                if not src.is_file():
+                    raise FileNotFoundError(
+                        f"Required HYSPLIT terrain data not found: {src}"
+                    )
+                shutil.copy2(src, local_bdy / filename)
+            bdy_path = "bdyfiles/"
         (folder / "ASCDATA.CFG").write_text(
             "-90.0 -180.0\n1.0 1.0\n180 360\n2\n0.2\n"
-            + "'" + bdy.as_posix().rstrip("/") + "/'\n", encoding="ascii"
+            + "'" + bdy_path + "'\n", encoding="ascii"
         )
     with (folder / "starts.csv").open("w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
