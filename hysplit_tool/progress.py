@@ -5,7 +5,8 @@ tasks show activity instead of a fabricated percentage; NOAA uses bytes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import Lock
 from typing import Callable
 
 
@@ -14,10 +15,12 @@ class TaskProgress:
     total: int
     send: Callable[[dict[str, object]], None]
     done: int = 0
+    _lock: Lock | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         if self.total < 1:
             raise ValueError("Progress needs at least one operation")
+        self._lock = Lock()
         self._emit("処理を開始します", active=False)
 
     def _emit(self, label: str, *, active: bool,
@@ -39,8 +42,10 @@ class TaskProgress:
         self._emit(label, active=True, part=fraction)
 
     def complete(self, label: str) -> None:
-        if self.done >= self.total:
-            raise ValueError("Progress completed more operations than planned")
-        self.done += 1
-        self._emit(label, active=False)
+        assert self._lock is not None
+        with self._lock:
+            if self.done >= self.total:
+                raise ValueError("Progress completed more operations than planned")
+            self.done += 1
+            self._emit(label, active=False)
 

@@ -52,7 +52,7 @@ def _save_checkpoint(checkpoint: Path, token: str, count: int) -> None:
     os.replace(temporary, checkpoint)
 
 
-def _create_file(file, selected, np) -> None:
+def _create_file(file, selected, np, *, write_static: bool = True) -> None:
     """Create NetCDF4 variables with xarray-compatible CF time/axis metadata."""
     file.createDimension("time", None)
     for dim in ("level", "latitude", "longitude"):
@@ -92,10 +92,11 @@ def _create_file(file, selected, np) -> None:
                 setattr(nc, attr, data.attrs[attr])
 
     # Static topography is relatively small; emit once.
-    for name in selected.data_vars:
-        if "time" not in selected[name].dims:
-            values = np.asarray(selected[name].values)
-            file[name][:] = values
+    if write_static:
+        for name in selected.data_vars:
+            if "time" not in selected[name].dims:
+                values = np.asarray(selected[name].values)
+                file[name][:] = values
     file.sync()
 
 
@@ -109,6 +110,11 @@ def _assert_resume_compatible(file, selected, np, count: int) -> None:
             raise ValueError(f"Partial ARCO NetCDF has incompatible coordinates {dim}")
     if set(selected.data_vars) - set(file.variables):
         raise ValueError("Partial ARCO NetCDF is missing a required variable")
+    for name, data in selected.data_vars.items():
+        if tuple(file[name].dimensions) != tuple(data.dims):
+            raise ValueError(
+                f"Partial ARCO NetCDF has incompatible dimensions for {name}"
+            )
     if not 0 <= count <= len(file.dimensions["time"]):
         raise ValueError("Partial ARCO checkpoint exceeds NetCDF time records")
     actual = np.asarray(file["time"][:count])
@@ -139,11 +145,101 @@ def _write_one_hour(file, selected, index: int, time_epoch: int, np) -> None:
     file["time"][index] = time_epoch
 
 
+def _migrate_allvars_partial(
+    source_partial: Path, source_checkpoint: Path,
+    temporary: Path, checkpoint: Path, selected, np, netCDF4,
+    token: str, notify: Callable[[str], None] | None,
+) -> int:
+    """Copy committed hours from an all-variable cache into a field subset.
+
+    The source remains untouched during migration. After the complete
+    HYSPLIT-only NetCDF is validated, the caller removes obsolete source
+    partials and migration staging files.
+    """
+    stage = temporary.with_name(temporary.name + ".migrating")
+    stage_checkpoint = checkpoint.with_name(checkpoint.name + ".migrating")
+    state = json.loads(source_checkpoint.read_text(encoding="utf-8"))
+    if state.get("format") != _FORMAT or not isinstance(state.get("token"), str):
+        raise ValueError("The all-variable partial checkpoint is invalid")
+    completed = int(state.get("completed_hours", -1))
+
+    # Recover a migration interrupted between the two atomic renames.
+    if temporary.is_file() and not checkpoint.is_file() and stage_checkpoint.is_file():
+        pending = json.loads(stage_checkpoint.read_text(encoding="utf-8"))
+        if pending.get("format") == _FORMAT and pending.get("token") == token:
+            try:
+                with netCDF4.Dataset(temporary, "r") as migrated:
+                    _assert_resume_compatible(
+                        migrated, selected, np, int(pending["completed_hours"])
+                    )
+                os.replace(stage_checkpoint, checkpoint)
+                return int(pending["completed_hours"])
+            except (OSError, KeyError, ValueError, TypeError):
+                # Preserve the source and rebuild the target staging copy below.
+                pass
+
+    if stage.is_file() and stage_checkpoint.is_file():
+        try:
+            pending = json.loads(stage_checkpoint.read_text(encoding="utf-8"))
+            if pending.get("format") == _FORMAT and pending.get("token") == token:
+                with netCDF4.Dataset(stage, "r") as migrated:
+                    _assert_resume_compatible(
+                        migrated, selected, np, int(pending["completed_hours"])
+                    )
+                os.replace(stage, temporary)
+                os.replace(stage_checkpoint, checkpoint)
+                if notify:
+                    notify(
+                        f"Google ARCO: recovered interrupted field migration; "
+                        f"resuming from {int(pending['completed_hours'])}/{len(selected.time)} hours"
+                    )
+                return int(pending["completed_hours"])
+        except (OSError, KeyError, ValueError, TypeError):
+            # The source archive remains intact, so an incomplete staging copy
+            # can safely be rebuilt on the next attempt.
+            pass
+    if stage.exists():
+        stage.unlink()
+    if stage_checkpoint.exists():
+        stage_checkpoint.unlink()
+
+    with netCDF4.Dataset(source_partial, "r") as source:
+        _assert_resume_compatible(source, selected, np, completed)
+        with netCDF4.Dataset(stage, "w", format="NETCDF4") as migrated:
+            _create_file(migrated, selected, np, write_static=False)
+            for name, data in selected.data_vars.items():
+                dims = tuple(data.dims)
+                if "time" in dims:
+                    if completed:
+                        slices = tuple(
+                            slice(0, completed) if dim == "time" else slice(None)
+                            for dim in dims
+                        )
+                        migrated[name][slices] = source[name][slices]
+                else:
+                    migrated[name][:] = source[name][:]
+            if completed:
+                migrated["time"][:completed] = source["time"][:completed]
+            migrated.sync()
+    _save_checkpoint(stage_checkpoint, token, completed)
+    with netCDF4.Dataset(stage, "r") as migrated:
+        _assert_resume_compatible(migrated, selected, np, completed)
+    os.replace(stage, temporary)
+    os.replace(stage_checkpoint, checkpoint)
+    if notify:
+        notify(
+            f"Google ARCO: migrated {completed} completed hours from the all-variable "
+            "partial file; the source partial remains until the HYSPLIT NetCDF completes"
+        )
+    return completed
+
+
 def export_hourly_netcdf(
     selected, result: Path, *,
     source: str,
     notify: Callable[[str], None] | None = None,
     progress: Callable[[int, int], None] | None = None,
+    migrate_from: tuple[Path, Path] | None = None,
 ) -> Path:
     """Export all requested hourly fields using bounded memory and resumable writes."""
     import netCDF4
@@ -161,6 +257,33 @@ def export_hourly_netcdf(
 
     completed = 0
     resume = False
+    if (temporary.is_file() and not checkpoint.is_file()
+            and checkpoint.with_name(checkpoint.name + ".migrating").is_file()):
+        if migrate_from is None:
+            raise RuntimeError(
+                f"Google ARCO: an interrupted field migration is present at {temporary}; "
+                "the original all-variable partial paths are required to recover it."
+            )
+        import netCDF4
+        completed = _migrate_allvars_partial(
+            Path(migrate_from[0]), Path(migrate_from[1]),
+            temporary, checkpoint, selected, np, netCDF4, token, notify,
+        )
+        resume = True
+    if (not temporary.exists() and not checkpoint.exists() and migrate_from is not None
+            and (Path(migrate_from[0]).exists() or Path(migrate_from[1]).exists())):
+        source_partial, source_checkpoint = map(Path, migrate_from)
+        if not source_partial.is_file() or not source_checkpoint.is_file():
+            raise RuntimeError(
+                "Google ARCO: the all-variable partial cache is incomplete; "
+                f"both files were preserved: {source_partial}, {source_checkpoint}"
+            )
+        import netCDF4
+        completed = _migrate_allvars_partial(
+            source_partial, source_checkpoint, temporary, checkpoint,
+            selected, np, netCDF4, token, notify,
+        )
+        resume = True
     if temporary.is_file() and checkpoint.is_file():
         try:
             state = json.loads(checkpoint.read_text(encoding="utf-8"))
@@ -171,13 +294,15 @@ def export_hourly_netcdf(
                 _assert_resume_compatible(file, selected, np, completed)
             resume = True
         except (OSError, KeyError, ValueError, TypeError) as exc:
-            if notify:
-                notify(f"Google ARCO: incompatible interrupted data; restart safely ({exc})")
-            completed = 0
-    if not resume:
-        # Older xarray .part files have no trustworthy hour-level checkpoint.
-        temporary.unlink(missing_ok=True)
-        checkpoint.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Google ARCO: existing partial data/checkpoint are incompatible. "
+                f"Both files were preserved: {temporary}, {checkpoint}. {exc}"
+            ) from exc
+    if not resume and (temporary.exists() or checkpoint.exists()):
+        raise RuntimeError(
+            f"Google ARCO: orphan partial NetCDF/checkpoint preserved at "
+            f"{temporary} and {checkpoint}. Inspect or relocate before retry."
+        )
 
     if notify:
         msg = (f"Google ARCO: hourly NetCDF export {completed}/{total} complete; "

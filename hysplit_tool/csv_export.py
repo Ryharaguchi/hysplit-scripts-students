@@ -1,7 +1,9 @@
-"""Consolidate a complete Windows HYSPLIT batch into one scientific CSV.
+"""Export selected Windows HYSPLIT trajectories to a scientific CSV.
 
-Every endpoint of every successful trajectory is written to trajectories.csv.
-The source CSV, per-group HYSPLIT tdump and run logs remain for provenance.
+Every endpoint of every selected successful trajectory is written to a CSV.
+The run pipeline keeps per-group HYSPLIT tdump and logs until the CSV and map
+are complete, then removes those bulky working folders after preserving the
+input snapshot, manifest and verified meteorology cache.
 
 Height conventions: SETUP.CFG sets KAGL=1 (trajectory tdump altitude AGL)
 and TM_TERR=1 (TERR_MSL, the terrain elevation diagnostic). MSL height is
@@ -20,6 +22,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .met_diagnostics import MeteorologicalVariable, selected_variables
+from .time_windows import TimeWindow
 
 UTC = timezone.utc
 JST = timezone(timedelta(hours=9), "JST")
@@ -44,6 +47,18 @@ class ExportResult:
     endpoints: int
     missing_terrain_endpoints: int
     groups: int
+
+
+def period_csv_name(period_index: int, window: TimeWindow) -> str:
+    """Return an unambiguous period-scoped result filename in JST dates."""
+    if period_index < 1:
+        raise ValueError("Period index must be positive")
+    start = window.start.astimezone(JST)
+    end = window.end.astimezone(JST)
+    return (
+        f"Trajectory_period_{period_index:02d}_"
+        f"{start:%Y%m%d}-{end:%Y%m%d}_JST.csv"
+    )
 
 
 def _year(value: int) -> int:
@@ -99,14 +114,14 @@ def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
             raise ValueError(f"Empty HYSPLIT output: {path}")
         try:
             nmet = int(header[0])
-            if not 0 <= nmet <= 100:
+            if nmet < 0:
                 raise ValueError("Invalid meteorological grid count")
             for _ in range(nmet):
                 if not handle.readline():
                     raise ValueError("Truncated meteorology header")
             record3 = handle.readline().split()
             ntrajs = int(record3[0])
-            if not 1 <= ntrajs <= 100_000:
+            if ntrajs < 1:
                 raise ValueError("Invalid trajectory count")
             for _ in range(ntrajs):
                 if not handle.readline():
@@ -114,7 +129,7 @@ def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
             record5 = handle.readline().split()
             nvars = int(record5[0])
             labels = [name.strip().upper() for name in record5[1:]]
-            if not 0 <= nvars <= 100 or len(labels) != nvars:
+            if nvars < 0 or len(labels) != nvars:
                 raise ValueError("Invalid meteorological diagnostic header")
             if height_reference not in ("AGL", "MSL"):
                 raise ValueError("Unknown source altitude convention")
@@ -132,8 +147,13 @@ def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
 
         for line_number, line in enumerate(handle, start=nmet+ntrajs+4):
             pieces = line.split()
-            if len(pieces) < 12+nvars:
+            if not pieces:
                 continue
+            if len(pieces) < 12+nvars:
+                raise ValueError(
+                    f"Truncated HYSPLIT endpoint at {path}:{line_number}: "
+                    f"expected at least {12+nvars} columns, found {len(pieces)}"
+                )
             try:
                 idx = int(pieces[0])
                 if idx not in starts:
@@ -201,8 +221,9 @@ def _tdump_rows(path: Path, starts: dict[int, dict[str, str]],
 
 def export_run_csv(run_root: Path, *, height_reference: str = "MSL",
                    group_folders: list[Path] | None = None,
-                   selected_diagnostics: Iterable[str] = ()) -> ExportResult:
-    """Aggregate all tdump endpoints into one UTF-8 BOM CSV per batch.
+                   selected_diagnostics: Iterable[str] = (),
+                   output_name: str = "trajectories.csv") -> ExportResult:
+    """Aggregate selected tdump endpoints into one UTF-8 BOM CSV.
 
     A missing required group or truncated tdump fails closed. The result
     CSV is written atomically so partial output cannot masquerade as a
@@ -218,8 +239,10 @@ def export_run_csv(run_root: Path, *, height_reference: str = "MSL",
     if not groups:
         raise ValueError(f"No HYSPLIT outputs to export: {root}")
 
-    path = root / "trajectories.csv"
-    partial = root / "trajectories.csv.part"
+    if Path(output_name).name != output_name or not output_name.lower().endswith(".csv"):
+        raise ValueError("CSV output name must be a plain .csv filename")
+    path = root / output_name
+    partial = path.with_name(path.name + ".part")
     partial.unlink(missing_ok=True)
     endpoints = 0
     missing = 0

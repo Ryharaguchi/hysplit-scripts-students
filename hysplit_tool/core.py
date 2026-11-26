@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import math
+import os
 import re
 import unicodedata
 from decimal import Decimal, InvalidOperation
@@ -23,6 +24,12 @@ from .met_diagnostics import flags_for_setup
 UTC = timezone.utc
 JST = timezone(timedelta(hours=9), name="JST")
 EARTH_RADIUS_KM = 6371.0088
+def automatic_worker_count(task_count: int, *, cpu_count: int | None = None) -> int:
+    """Use queued work and available logical CPUs, with one CPU left for Windows."""
+    if task_count < 1:
+        return 1
+    logical_cpus = cpu_count or os.cpu_count() or 1
+    return max(1, min(task_count, max(1, logical_cpus - 1)))
 
 
 @dataclass(frozen=True)
@@ -40,8 +47,8 @@ class StartPoint:
             raise ValueError("latitude must be within [-90, 90]")
         if not (-180 <= self.longitude <= 180):
             raise ValueError("longitude must be within [-180, 180]")
-        if not math.isfinite(self.height_m) or self.height_m <= 0:
-            raise ValueError("initial height must be a positive finite number")
+        if not math.isfinite(self.height_m):
+            raise ValueError("initial height must be finite")
 
 
 @dataclass(frozen=True)
@@ -75,18 +82,16 @@ def parse_heights(spec: str) -> list[float]:
             start, stop, step = (float(x.strip()) for x in spec.split(":"))
         except (ValueError, TypeError) as exc:
             raise ValueError("Height range must be start:stop:step in meters") from exc
-        if not all(math.isfinite(x) for x in (start, stop, step)) or start <= 0 or step <= 0 or stop < start:
-            raise ValueError("Height range needs 0 < start <= stop and step > 0")
+        if not all(math.isfinite(x) for x in (start, stop, step)) or step <= 0 or stop < start:
+            raise ValueError("Height range needs finite start/stop and 0 < step")
         count = math.floor((stop - start) / step + 1e-10) + 1
-        if count > 100_000:
-            raise ValueError("Too many initial heights (limit 100000)")
         return [round(start + i * step, 6) for i in range(count)]
     try:
         values = [float(x.strip()) for x in spec.split(",")]
     except ValueError as exc:
         raise ValueError("Heights must be comma-separated numeric meters") from exc
-    if not values or any(not math.isfinite(v) or v <= 0 for v in values):
-        raise ValueError("All heights must be positive finite meters")
+    if not values or any(not math.isfinite(v) for v in values):
+        raise ValueError("All heights must be finite meters")
     return values
 
 
@@ -118,15 +123,14 @@ def parse_xy_offsets(spec: str) -> list[tuple[float, float]]:
 
 
 def shifted_location(latitude: float, longitude: float, east_km: float, north_km: float) -> tuple[float, float]:
-    """Small-offset spherical approximation; not suitable close to the poles."""
-    lat = latitude + math.degrees(north_km / EARTH_RADIUS_KM)
-    if abs(lat) >= 89.9:
-        raise ValueError("Position offsets too near a pole")
-    lon = longitude + math.degrees(east_km / (EARTH_RADIUS_KM * math.cos(math.radians(latitude))))
-    if not -90 <= lat <= 90:
-        raise ValueError("Position offset exceeds latitude bounds")
-    lon = (lon + 180) % 360 - 180
-    return lat, lon
+    """Move by east/north offsets on a sphere, including near the poles."""
+    if not all(math.isfinite(value) for value in (latitude, longitude, east_km, north_km)):
+        raise ValueError("Position and offsets must be finite")
+    distance = math.hypot(east_km, north_km)
+    if distance == 0:
+        return latitude, longitude
+    bearing = math.degrees(math.atan2(east_km, north_km)) % 360.0
+    return destination_location(latitude, longitude, bearing, distance)
 
 
 def parse_jst(value: str) -> datetime:
@@ -276,7 +280,7 @@ def _excel_csv_delimiter(lines: list[str]) -> tuple[str, int]:
         ) + 1
     text = "\n".join(line for line in lines if line.strip())[:8192]
     try:
-        detected = csv.Sniffer().sniff(text, delimiters=",;\\t").delimiter
+        detected = csv.Sniffer().sniff(text, delimiters=",;\t").delimiter
         return detected, 0
     except csv.Error:
         pass
@@ -341,8 +345,6 @@ def load_starts_csv(path: Path) -> list[StartPoint]:
         ) from exc
     if not result:
         raise ValueError("CSV has no observation rows")
-    if len(result) > 100_000:
-        raise ValueError("CSV has more than 100,000 observation rows")
     return result
 
 
@@ -365,30 +367,28 @@ def destination_location(latitude: float, longitude: float,
 
 
 def expand_observations(bases: Iterable[StartPoint], distance_km: float,
-                        time_shift_minutes: float, limit: int = 100_000) -> list[StartPoint]:
+                        time_shift_minutes: float) -> list[StartPoint]:
     """Center + 8 compass bearings (equal radius); observation time ± minutes.
 
     Positive distance produces 9 locations. Positive time_shift_minutes
     produces 3 start times (-shift, 0, +shift), all resolved in UTC.
     """
-    if not math.isfinite(distance_km) or distance_km < 0 or distance_km > 10000:
-        raise ValueError("Horizontal distance must be within 0..10000 km")
+    if not math.isfinite(distance_km) or distance_km < 0:
+        raise ValueError("Horizontal distance must be nonnegative finite km")
     if (not math.isfinite(time_shift_minutes) or time_shift_minutes < 0
-            or time_shift_minutes > 10080 or not float(time_shift_minutes).is_integer()):
-        raise ValueError("Time shift must be a whole number of minutes (0..10080)")
+            or not float(time_shift_minutes).is_integer()):
+        raise ValueError("Time shift must be a whole number of nonnegative minutes")
     bases = list(bases)
     shifts = [0.0] if not time_shift_minutes else [
         -time_shift_minutes, 0.0, time_shift_minutes]
     bearings = [None] if distance_km == 0 else [
         None, 0, 45, 90, 135, 180, 225, 270, 315]
-    if len(bases) * len(shifts) * len(bearings) > limit:
-        raise ValueError(f"Too many trajectories (limit {limit})")
     points = []
     for point in bases:
         for delta in shifts:
             when = point.when + timedelta(minutes=delta)
-            if not 1970 <= when.year <= 2099:
-                raise ValueError("Supported simulation years: 1970..2099")
+            if not 1970 <= when.year <= 2069:
+                raise ValueError("HYSPLIT two-digit dates are unambiguous for 1970..2069")
             for bearing in bearings:
                 lat, lon = (point.latitude, point.longitude) if bearing is None else \
                     destination_location(point.latitude, point.longitude, bearing, distance_km)
@@ -405,11 +405,9 @@ def fixed_starts(
     if last < first:
         raise ValueError("End time must be no earlier than start time")
     count = math.floor((last - first).total_seconds() / (step_hours * 3600) + 1e-10) + 1
-    if count > 100_000:
-        raise ValueError("Too many start times (limit 100000)")
     heights = list(heights)
-    if count * len(heights) > 100_000:
-        raise ValueError("Too many initial points (limit 100000)")
+    if not heights:
+        raise ValueError("At least one initial height is required")
     return [StartPoint(first + timedelta(hours=i * step_hours), latitude, longitude, h)
             for i in range(count) for h in heights]
 
@@ -418,17 +416,18 @@ def expand_starts(
     bases: Iterable[StartPoint],
     xy_offsets: Iterable[tuple[float, float]],
     time_offsets_hours: Iterable[float],
-    limit: int = 100_000,
 ) -> list[StartPoint]:
     bases, offsets, time_offsets = list(bases), list(xy_offsets), list(time_offsets_hours)
-    if len(bases) * len(offsets) * len(time_offsets) > limit:
-        raise ValueError(f"Too many trajectories (limit {limit}); reduce settings")
+    if not bases or not offsets or not time_offsets:
+        raise ValueError("Bases, spatial offsets and time offsets must be nonempty")
     points = []
     for point in bases:
         for dt_hours in time_offsets:
+            if not math.isfinite(dt_hours):
+                raise ValueError("Time offsets must be finite hours")
             when = point.when + timedelta(hours=dt_hours)
-            if when.year < 1970 or when.year > 2099:
-                raise ValueError("Supported simulation years: 1970-2099")
+            if when.year < 1970 or when.year > 2069:
+                raise ValueError("HYSPLIT two-digit dates are unambiguous for 1970..2069")
             for east, north in offsets:
                 lat, lon = shifted_location(point.latitude, point.longitude, east, north)
                 points.append(StartPoint(when, lat, lon, point.height_m, point.origin))
@@ -436,8 +435,8 @@ def expand_starts(
 
 
 def group_starts(starts: Iterable[StartPoint], max_points: int = 100) -> list[RunGroup]:
-    if not 1 <= max_points <= 10_000:
-        raise ValueError("Maximum starts per HYSPLIT run must be 1..10000")
+    if max_points < 1:
+        raise ValueError("Maximum starts per HYSPLIT run must be positive")
     grouped: dict[datetime, list[StartPoint]] = defaultdict(list)
     for start in starts:
         grouped[start.when].append(start)
@@ -451,7 +450,7 @@ def group_starts(starts: Iterable[StartPoint], max_points: int = 100) -> list[Ru
 
 
 def automatic_model_top(starts: Iterable[StartPoint]) -> float:
-    """HYSPLIT CONTROL upper-bound, hidden from the user's GUI.
+    """HYSPLIT CONTROL upper-bound when GUI's model-top input is empty.
 
     CSV determines initial heights, not the possible altitude reached along a
     backward trajectory; CONTROL still requires a model top in metres AGL.
@@ -459,7 +458,7 @@ def automatic_model_top(starts: Iterable[StartPoint]) -> float:
     heights = [point.height_m for point in starts]
     if not heights:
         raise ValueError("Cannot configure HYSPLIT model top without start points")
-    return max(20000.0, 1000.0 * math.ceil((max(heights) + 1000.0) / 1000.0))
+    return max(25000.0, 1000.0 * math.ceil((max(heights) + 1000.0) / 1000.0))
 
 
 def render_control(group: RunGroup, met_paths: list[Path], back_hours: int, model_top_m: float) -> str:
@@ -467,7 +466,8 @@ def render_control(group: RunGroup, met_paths: list[Path], back_hours: int, mode
         raise ValueError("Backward duration must be 1..9999 hours")
     if not met_paths:
         raise ValueError("No ARL meteorological files selected")
-    if model_top_m <= 0 or any(p.height_m >= model_top_m for p in group.points):
+    if (not math.isfinite(model_top_m) or model_top_m <= 0
+            or any(p.height_m >= model_top_m for p in group.points)):
         raise ValueError("Model top must exceed every starting height")
     # Per HYSPLIT CONTROL spec, minutes can be included in start time.
     lines = [group.when.strftime("%y %m %d %H %M"), str(len(group.points))]
@@ -553,19 +553,21 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
         except UnicodeEncodeError:
             # Legacy HYSPLIT Fortran expects ASCII path strings in
             # ASCDATA.CFG. A personal Windows directory named "配布" or
-            # "マイドライブ" cannot be encoded there. Place the three small
-            # 1-degree terrain tables beside this individual run and use a
-            # portable relative ASCII path instead of rejecting it.
-            local_bdy = folder / "bdyfiles"
-            local_bdy.mkdir()
+            # "マイドライブ" cannot be encoded there. Store one shared copy
+            # beside all groups in this run instead of duplicating these files
+            # into every trajectory group's working directory.
+            local_bdy = Path(run_root) / "bdyfiles"
+            local_bdy.mkdir(exist_ok=True)
             for filename in ("LANDUSE.ASC", "ROUGLEN.ASC", "TERRAIN.ASC"):
                 src = bdy / filename
                 if not src.is_file():
                     raise FileNotFoundError(
                         f"Required HYSPLIT terrain data not found: {src}"
                     )
-                shutil.copy2(src, local_bdy / filename)
-            bdy_path = "bdyfiles/"
+                destination = local_bdy / filename
+                if not destination.is_file():
+                    shutil.copy2(src, destination)
+            bdy_path = "../bdyfiles/"
         (folder / "ASCDATA.CFG").write_text(
             "-90.0 -180.0\n1.0 1.0\n180 360\n2\n0.2\n"
             + "'" + bdy_path + "'\n", encoding="ascii"
@@ -578,6 +580,30 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
     return folder
 
 
+def execute_group(executable: Path, folder: Path,
+                  notify: Callable[[str], None] | None = None) -> tuple[Path, bool]:
+    """Run one prepared HYSPLIT group; suitable for bounded period pipelines."""
+    require_native_windows()
+    executable = Path(executable).resolve()
+    if not executable.is_file():
+        raise FileNotFoundError(f"HYSPLIT executable not found: {executable}")
+    folder = Path(folder)
+    with (folder / "run.log").open("w", encoding="utf-8", errors="replace") as log:
+        try:
+            result = subprocess.run([str(executable)], cwd=folder, stdout=log,
+                                    stderr=subprocess.STDOUT, check=False)
+            dump = folder / "tdump"
+            success = result.returncode == 0 and dump.is_file() and dump.stat().st_size > 0
+            if not success:
+                log.write(f"\nHYSPLIT return code: {result.returncode}; tdump missing/empty?\n")
+        except OSError as exc:
+            log.write(f"\nFailed to start HYSPLIT: {exc}\n")
+            success = False
+    if notify:
+        notify(f"{'OK' if success else 'FAILED'}: {folder.name} (see run.log and MESSAGE)")
+    return folder, success
+
+
 def execute_groups(executable: Path, folders: list[Path], workers: int = 2,
                    notify: Callable[[str], None] | None = None,
                    progress: Callable[[int, int], None] | None = None) -> list[tuple[Path, bool]]:
@@ -585,29 +611,14 @@ def execute_groups(executable: Path, folders: list[Path], workers: int = 2,
     executable = Path(executable).resolve()
     if not executable.is_file():
         raise FileNotFoundError(f"HYSPLIT executable not found: {executable}")
-    if not 1 <= workers <= 32:
-        raise ValueError("Parallel workers must be 1..32")
-
-    def run(folder: Path) -> tuple[Path, bool]:
-        with (folder / "run.log").open("w", encoding="utf-8", errors="replace") as log:
-            try:
-                result = subprocess.run([str(executable)], cwd=folder, stdout=log,
-                                        stderr=subprocess.STDOUT, check=False)
-                dump = folder / "tdump"
-                success = result.returncode == 0 and dump.is_file() and dump.stat().st_size > 0
-                if not success:
-                    log.write(f"\nHYSPLIT return code: {result.returncode}; tdump missing/empty?\n")
-            except OSError as exc:
-                log.write(f"\nFailed to start HYSPLIT: {exc}\n")
-                success = False
-        if notify:
-            notify(f"{'OK' if success else 'FAILED'}: {folder.name} (see run.log and MESSAGE)")
-        return folder, success
+    if workers < 1:
+        raise ValueError("Parallel workers must be positive")
 
     # Report actual completions, not submission order: a slow first job must
     # not make progress appear frozen while later groups finish.
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(run, folder) for folder in folders]
+    with ThreadPoolExecutor(max_workers=min(workers, max(1, len(folders)))) as pool:
+        futures = [pool.submit(execute_group, executable, folder, notify)
+                   for folder in folders]
         completed: dict[Path, bool] = {}
         for i, future in enumerate(as_completed(futures), start=1):
             folder, success = future.result()

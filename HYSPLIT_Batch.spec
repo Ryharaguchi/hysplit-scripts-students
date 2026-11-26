@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Windows x64 portable HYSPLIT Batch GUI, without NOAA model executables.
+"""Windows x64 portable HYSPLIT Batch GUI; NOAA model files stay separate.
 
 PyInstaller builds all Python, tkinter and ERA5 dependencies into an onedir
-application. NOAA HYSPLIT (hyts_std.exe, grib2arl.exe, filedates.exe, bdyfiles)
-MUST be installed separately and is NOT bundled due to NOAA restrictions.
+application. The combined distribution ZIP places the NOAA HYSPLIT installation
+tree beside the GUI application; the model is not embedded in this executable.
 """
 from pathlib import Path
 

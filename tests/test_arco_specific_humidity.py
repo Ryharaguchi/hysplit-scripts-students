@@ -18,6 +18,7 @@ from hysplit_tool.era5 import download_google_arco
 from hysplit_tool.arco_convert import (
     PRESSURE_LEVELS, PRESSURE_PARAMS, SURFACE_PARAMS,
     relative_humidity_from_specific_humidity,
+    _clip_negative_specific_humidity_for_rh,
 )
 
 HAS_LIBS = os.name == "nt" and all(
@@ -29,7 +30,8 @@ HAS_LIBS = os.name == "nt" and all(
 @unittest.skipUnless(HAS_LIBS, "Optional Windows ERA5 libraries unavailable")
 class TestArcoSpecificHumidity(unittest.TestCase):
     @staticmethod
-    def _sample(tmp: Path, q_only: bool = True, q_value: float = 0.001):
+    def _sample(tmp: Path, q_only: bool = True, q_value: float = 0.001,
+                longitude_count: int = 3, longitude_start: float = 134.75):
         import numpy as np
         import xarray as xr
 
@@ -39,7 +41,7 @@ class TestArcoSpecificHumidity(unittest.TestCase):
             ),
             "level": list(PRESSURE_LEVELS),
             "latitude": [35.25, 35.0],
-            "longitude": [134.75, 135.0, 135.25],
+            "longitude": [longitude_start + 0.25 * i for i in range(longitude_count)],
         }
         variables = {}
         for name, _param, _unit in PRESSURE_PARAMS:
@@ -49,24 +51,24 @@ class TestArcoSpecificHumidity(unittest.TestCase):
                 100.0 if name == "relative_humidity" else 1.0
             variables[name] = (
                 ("time", "level", "latitude", "longitude"),
-                np.full((2, len(PRESSURE_LEVELS), 2, 3), base, dtype=np.float32),
+                np.full((2, len(PRESSURE_LEVELS), 2, longitude_count), base, dtype=np.float32),
             )
         if q_only:
             variables["specific_humidity"] = (
                 ("time", "level", "latitude", "longitude"),
-                np.full((2, len(PRESSURE_LEVELS), 2, 3), q_value, dtype=np.float32),
+                np.full((2, len(PRESSURE_LEVELS), 2, longitude_count), q_value, dtype=np.float32),
             )
         for name, param, _unit in SURFACE_PARAMS:
             value = 101325.0 if name == "surface_pressure" else 275.0
             if name == "geopotential_at_surface":
                 variables[name] = (
                     ("latitude", "longitude"),
-                    np.full((2,3), 200.0, dtype=np.float32),
+                    np.full((2,longitude_count), 200.0, dtype=np.float32),
                 )
             else:
                 variables[name] = (
                     ("time", "latitude", "longitude"),
-                    np.full((2,2,3), value, dtype=np.float32),
+                    np.full((2,2,longitude_count), value, dtype=np.float32),
                 )
         ds = xr.Dataset(variables, coords=coords)
         return ds
@@ -96,6 +98,36 @@ class TestArcoSpecificHumidity(unittest.TestCase):
         ]:
             with self.subTest(temp=t, q=q), self.assertRaises(ValueError):
                 relative_humidity_from_specific_humidity(t, q, 925, np)
+
+    def test_invalid_values_report_pressure_and_ranges(self):
+        import numpy as np
+        with self.assertRaisesRegex(
+            ValueError,
+            r"1000 hPa: temperature range=\[280, 280\] K, invalid=0/1; "
+            r"specific_humidity range=\[-0\.001, -0\.001\] kg/kg, invalid=1/1",
+        ):
+            relative_humidity_from_specific_humidity(
+                np.array([280.0]), np.array([-0.001]), 1000.0, np
+            )
+
+    def test_negative_q_is_floored_for_rh_without_changing_source_values(self):
+        import numpy as np
+        negative_q = -3.89152439e-4
+        q = np.full((361, 1440), 0.001, dtype=np.float64)
+        q.flat[:56] = negative_q
+        corrected, count, minimum = _clip_negative_specific_humidity_for_rh(q, np)
+        self.assertEqual(count, 56)
+        self.assertEqual(minimum, negative_q)
+        self.assertTrue(np.all(corrected.flat[:56] == 0.0))
+        self.assertTrue(np.all(q.flat[:56] == negative_q))
+
+        # No locally invented magnitude or prevalence threshold blocks RH derivation.
+        extreme, extreme_count, extreme_minimum = (
+            _clip_negative_specific_humidity_for_rh(np.array([-0.2, -1e-5, 0.001]), np)
+        )
+        self.assertEqual(extreme_count, 2)
+        self.assertEqual(extreme_minimum, -0.2)
+        np.testing.assert_array_equal(extreme, np.array([0.0, 0.0, 0.001]))
 
     def test_remote_selection_accepts_specific_humidity_without_rh(self):
         import xarray as xr
@@ -156,6 +188,63 @@ class TestArcoSpecificHumidity(unittest.TestCase):
             self.assertEqual(nmessages,2*len(PRESSURE_LEVELS)*len(PRESSURE_PARAMS))
             self.assertEqual(len(rh_values),2*len(PRESSURE_LEVELS)*2*3)
             self.assertTrue(any(0 < v < 100 for v in rh_values))
+
+    def test_tiny_negative_q_is_only_floored_in_derived_rh(self):
+        import eccodes as e
+        import numpy as np
+        import xarray as xr
+        from hysplit_tool.arco_convert import netcdf_to_grib1
+        negative_q = -1.6046346e-5
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            input_file, upper, lower = (
+                base / "era5_q_negative.nc", base / "pressure.grib", base / "surface.grib"
+            )
+            # One negative value among 2,002 grid cells.
+            ds = self._sample(base, q_only=True, longitude_count=1001, longitude_start=0.25)
+            ds["specific_humidity"].loc[{
+                "time": np.datetime64("2019-01-05T00:00"),
+                "level": 150,
+                "latitude": 35.25,
+                "longitude": 134.75,
+            }] = negative_q
+            ds.to_netcdf(input_file, engine="netcdf4")
+            ds.close()
+            notices = []
+            quality = {}
+            netcdf_to_grib1(
+                input_file, upper, lower, notify=notices.append, quality_report=quality
+            )
+            with xr.open_dataset(input_file, engine="netcdf4") as saved:
+                original = float(saved["specific_humidity"].sel(
+                    time="2019-01-05T00:00", level=150,
+                    latitude=35.25, longitude=134.75,
+                ).values)
+            self.assertLess(original, 0.0)
+            self.assertAlmostEqual(original, negative_q, delta=1e-10)
+            self.assertEqual(
+                quality["negative_specific_humidity_values_set_to_zero_for_rh"], 1
+            )
+            self.assertEqual(quality["by_pressure_level_hpa"]["150"], 1)
+            self.assertFalse(quality["source_netcdf_modified"])
+            self.assertTrue(any("source NetCDF unchanged" in notice for notice in notices))
+            grib = upper.read_bytes()
+            at = 0
+            found_clipped_cell = False
+            while at < len(grib):
+                size = int.from_bytes(grib[at + 4:at + 7], "big")
+                handle = e.codes_new_from_message(grib[at:at + size])
+                try:
+                    if (e.codes_get(handle, "paramId") == 157 and
+                            e.codes_get(handle, "level") == 150 and
+                            e.codes_get(handle, "dataTime") == 0):
+                        values = np.asarray(e.codes_get_values(handle))
+                        self.assertEqual(values[538], 0.0)
+                        found_clipped_cell = True
+                finally:
+                    e.codes_release(handle)
+                at += size
+            self.assertTrue(found_clipped_cell)
 
     def test_netcdf_no_humidity_still_fails_safely(self):
         import xarray as xr

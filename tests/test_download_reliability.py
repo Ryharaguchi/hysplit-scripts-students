@@ -121,7 +121,7 @@ class TestArcoCache(unittest.TestCase):
         import xarray as xr
         import numpy as np
         from hysplit_tool.arco_convert import PRESSURE_LEVELS, PRESSURE_PARAMS, SURFACE_PARAMS
-        coords={"time":np.array(["2019-01-05T00:00","2019-01-05T01:00"],
+        coords={"time":np.array(["2019-01-05T00:00","2019-01-05T01:00","2019-01-05T02:00"],
                                   dtype="datetime64[m]"),
                 "latitude":[35.25,35.0],
                 "longitude":[134.75,135.0],
@@ -130,15 +130,15 @@ class TestArcoCache(unittest.TestCase):
         for name,*_ in PRESSURE_PARAMS:
             if name=="relative_humidity":continue
             fields[name]=(("time","level","latitude","longitude"),
-                         np.ones((2,12,2,2),dtype="float32"))
+                         np.ones((3,len(PRESSURE_LEVELS),2,2),dtype="float32"))
         fields["specific_humidity"]=(("time","level","latitude","longitude"),
-                                     np.ones((2,12,2,2),dtype="float32")*0.001)
+                                     np.ones((3,len(PRESSURE_LEVELS),2,2),dtype="float32")*0.001)
         for name,*_ in SURFACE_PARAMS:
             if name=="geopotential_at_surface":
                 fields[name]=(("latitude","longitude"),np.ones((2,2),dtype="float32"))
             else:
                 fields[name]=(("time","latitude","longitude"),
-                             np.ones((2,2,2),dtype="float32"))
+                             np.ones((3,2,2),dtype="float32"))
         ds=xr.Dataset(fields,coords=coords)
         a=datetime(2019,1,5,0,tzinfo=UTC)
         b=datetime(2019,1,5,1,tzinfo=UTC)

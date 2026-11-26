@@ -78,10 +78,10 @@ def split_window(
     max_span: timedelta = timedelta(days=13),
     overlap: timedelta = timedelta(hours=1),
 ) -> tuple[TimeWindow, ...]:
-    """Split long remote ARCO requests with overlap across chunk boundaries.
+    """Split a long period into resumable local work chunks with overlap.
 
-    Each Google Zarr export stays within its single-call temporal limit,
-    while the full original meteorology interval remains covered.
+    This is an application-side disk/recovery strategy, not a remote ARCO API
+    limit. The overlap keeps the edge hours available to HYSPLIT interpolation.
     """
     if max_span <= timedelta(0) or overlap < timedelta(0) or overlap >= max_span:
         raise ValueError("Invalid chunk duration or overlap")

@@ -26,15 +26,15 @@ def read_tdump(path: Path) -> dict[int, list[tuple[float, float, float, float]]]
             raise ValueError(f"Empty trajectory file: {path}")
         try:
             nmet = int(first[0])
-            if not 0 <= nmet <= 100:
+            if nmet < 0:
                 raise ValueError()
             for _ in range(nmet):
                 if not file.readline():
                     raise ValueError("Incomplete meteorological header")
             record = file.readline().split()
             ntraj = int(record[0])
-            if not 1 <= ntraj <= 100000:
-                raise ValueError("Implausible trajectory count")
+            if ntraj < 1:
+                raise ValueError("Invalid trajectory count")
             for _ in range(ntraj):
                 if not file.readline():
                     raise ValueError("Incomplete trajectory header")
@@ -45,20 +45,25 @@ def read_tdump(path: Path) -> dict[int, list[tuple[float, float, float, float]]]
             raise ValueError(f"Invalid HYSPLIT tdump header: {path}") from exc
 
         trajectories = defaultdict(list)
-        for line in file:
+        for line_number, line in enumerate(file, start=nmet+ntraj+4):
             fields = line.split()
-            if len(fields) < 12:
+            if not fields:
                 continue
+            if len(fields) < 12:
+                raise ValueError(
+                    f"Truncated endpoint at {path}:{line_number}: "
+                    f"expected at least 12 columns, found {len(fields)}"
+                )
             try:
                 traj = int(fields[0])
                 age = float(fields[8])
                 latitude, longitude, altitude = map(float, fields[9:12])
-            except ValueError:
-                continue
+            except ValueError as exc:
+                raise ValueError(f"Invalid endpoint at {path}:{line_number}: {exc}") from exc
             if (not 1 <= traj <= ntraj or not all(map(math.isfinite,
                     (latitude, longitude, altitude, age))) or not -90 <= latitude <= 90
                     or not -360 <= longitude <= 360):
-                continue
+                raise ValueError(f"Invalid endpoint values at {path}:{line_number}")
             trajectories[traj].append((latitude, longitude, altitude, age))
     if not trajectories:
         raise ValueError(f"No valid endpoints in {path}")
@@ -81,10 +86,7 @@ def create_map(run_root: Path, *, max_trajectories: int = 500,
     features = []
     total = 0
     for path in files:
-        try:
-            runs = read_tdump(path)
-        except ValueError:
-            continue
+        runs = read_tdump(path)
         for ident, points in sorted(runs.items()):
             total += 1
             if len(features) >= max_trajectories:
@@ -117,9 +119,11 @@ def create_map(run_root: Path, *, max_trajectories: int = 500,
 
     # Offline SVG preview: no OpenStreetMap tiles, Leaflet, or CDN required.
     title = run_root.name
-    note = (f"Showing {len(features):,} of {total:,} trajectories; "
-            "other trajectories remain in original tdump files."
-            if len(features) < total else f"Showing all {len(features):,} trajectories.")
+    note = (
+        f"Map preview: {len(features):,} of {total:,} trajectories; "
+        f"up to {max_points_per_trajectory:,} points per displayed path. "
+        "The period result CSVs contain the full exported trajectories."
+    )
     html_path = output / "index.html"
     html_path.write_text(offline_html(features, title, note), encoding="utf-8")
     return html_path, geo_path, len(features), total

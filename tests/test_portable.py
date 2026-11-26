@@ -42,7 +42,8 @@ class TestPortablePaths(unittest.TestCase):
         from hysplit_tool import portable
         with tempfile.TemporaryDirectory() as td:
             with patch.object(portable, "windows_desktop_dir", return_value=Path(td)), \
-                 patch("hysplit_tool.gui.default_work_root", return_value=Path(td)/"HYSPLIT_Work"):
+                 patch("hysplit_tool.gui.default_work_root", return_value=Path(td)/"HYSPLIT_Work"), \
+                 patch("hysplit_tool.gui.settings_path", return_value=Path(td)/"settings.json"):
                 gui = App()
                 gui.withdraw()
                 try:
@@ -51,6 +52,40 @@ class TestPortablePaths(unittest.TestCase):
                     self.assertNotIn("cloud_copy_root", gui.v)
                 finally:
                     gui.destroy()
+
+    def test_gui_restores_run_settings_from_user_settings_file(self):
+        from hysplit_tool.gui import App
+        with tempfile.TemporaryDirectory() as td:
+            settings = Path(td) / "settings.json"
+            with patch("hysplit_tool.gui.settings_path", return_value=settings):
+                first = App()
+                first.withdraw()
+                first.v["provider"].set("ERA5 CDS (0.25°)")
+                first.v["csv"].set(r"H:\マイドライブ\observations.csv")
+                first.v["distance_km"].set("30")
+                first.v["hours"].set("72")
+                first.v["height_ref"].set("MSL")
+                first.v["workers"].set("自動")
+                first.met_checks["TM_RELH"].set(False)
+                first.show_advanced_timestep.set(True)
+                first._toggle_advanced_time()
+                first.v["integration_step_minutes"].set("5")
+                self.assertTrue(first._save_settings())
+                first.destroy()
+
+                second = App()
+                second.withdraw()
+                try:
+                    self.assertEqual(second.v["provider"].get(), "ERA5 CDS (0.25°)")
+                    self.assertEqual(second.v["csv"].get(), r"H:\マイドライブ\observations.csv")
+                    self.assertEqual(second.v["distance_km"].get(), "30")
+                    self.assertEqual(second.v["hours"].get(), "72")
+                    self.assertEqual(second.v["height_ref"].get(), "MSL")
+                    self.assertEqual(second.v["integration_step_minutes"].get(), "5")
+                    self.assertFalse(second.met_checks["TM_RELH"].get())
+                    self.assertTrue(second.show_advanced_timestep.get())
+                finally:
+                    second.destroy()
 
     def test_grib_backend_emits_actual_grib1_message(self):
         import importlib.util

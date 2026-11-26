@@ -33,14 +33,22 @@ class TestUnicodeHysplitPath(unittest.TestCase):
             bdy=self._bdy(root/"マイドライブ"/"配布"/"HYSPLIT"/"bdyfiles")
             dest=root/"work"
             dest.mkdir()
-            folder=write_group(self._group(),dest,[root/"fake.arl"],
-                               2,20000,"AGL",bdy)
-            contents=(folder/"ASCDATA.CFG").read_bytes()
+            point = self._group().points[0]
+            groups = group_starts([
+                point,
+                StartPoint(datetime(2019,1,5,4,tzinfo=timezone.utc),
+                           point.latitude, point.longitude, point.height_m),
+            ])
+            folders = [write_group(group,dest,[root/"fake.arl"],
+                                   2,20000,"AGL",bdy) for group in groups]
+            contents=(folders[0]/"ASCDATA.CFG").read_bytes()
             self.assertTrue(contents.isascii())
-            self.assertIn(b"'bdyfiles/'",contents)
+            self.assertIn(b"'../bdyfiles/'",contents)
             for name in ("LANDUSE.ASC","ROUGLEN.ASC","TERRAIN.ASC"):
-                self.assertEqual((folder/"bdyfiles"/name).read_bytes(),
+                self.assertEqual((dest/"bdyfiles"/name).read_bytes(),
                                  (bdy/name).read_bytes())
+            self.assertFalse((folders[0]/"bdyfiles").exists())
+            self.assertFalse((folders[1]/"bdyfiles").exists())
 
     def test_ascii_model_path_preserves_existing_direct_reference(self):
         with tempfile.TemporaryDirectory() as temp:

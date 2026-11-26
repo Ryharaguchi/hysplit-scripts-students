@@ -3,11 +3,14 @@ import csv
 import math
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from hysplit_tool.csv_export import (
     OUTPUT_COLUMNS, _geopotential_height_estimate, export_run_csv,
+    period_csv_name,
 )
+from hysplit_tool.time_windows import TimeWindow
 
 
 def make_group(root: Path, name: str, *, terrain: bool = True,
@@ -45,6 +48,28 @@ def make_group(root: Path, name: str, *, terrain: bool = True,
 
 
 class TestFullExport(unittest.TestCase):
+    def test_period_output_name_uses_period_index_and_jst_dates(self):
+        window=TimeWindow(
+            datetime(2026,4,29,10,tzinfo=timezone.utc),
+            datetime(2026,5,2,11,tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            period_csv_name(1,window),
+            "Trajectory_period_01_20260429-20260502_JST.csv",
+        )
+
+    def test_export_can_write_period_scoped_csv_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            group=make_group(root,"case")
+            report=export_run_csv(
+                root,group_folders=[group],
+                output_name="Trajectory_period_01_20261010-20261010_JST.csv",
+            )
+            self.assertEqual(report.path.name,
+                             "Trajectory_period_01_20261010-20261010_JST.csv")
+            self.assertTrue(report.path.is_file())
+
     def test_all_batches_and_height_fields(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

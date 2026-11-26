@@ -1,14 +1,17 @@
 """Windows-only Google ARCO ERA5 NetCDF -> GRIB1 -> HYSPLIT ARL.
 
 ARCO's 0.25-degree pressure/surface dataset is NOT a generic CF-NetCDF input.
-This decoder explicitly validates the required ECMWF parameters, 12 pressure
+This decoder explicitly validates the required ECMWF parameters, 37 pressure
 levels, hourly steps and regular 0.25-degree grid. It then encodes GRIB1 using
 ECMWF ecCodes, invokes the already-installed native grib2arl.exe, and refuses
 to publish ARL until NOAA filedates.exe confirms complete temporal coverage.
 
 Important: successful ARL packaging does not prove meteorological accuracy or
 that a regional grid contains the entire backward trajectory. The Zarr source
-can require large transfers even for a small regional NetCDF subset.
+can require large transfers even for a small regional NetCDF subset. Completed
+GRIB inputs are retained after a failed conversion so retry does not repeat the
+NetCDF scan; they are removed only after the ARL has passed timestamp validation.
+Validated ARLs remain as the reusable cache.
 """
 from __future__ import annotations
 
@@ -20,15 +23,22 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from .native_era5 import run_native_grib1_pair
+from .era5 import PRESSURE_LEVELS as ERA5_PRESSURE_LEVELS
+from .native_era5 import (
+    _grib2arl_is_running,
+    check_arco_conversion_space,
+    require_grib1,
+    run_native_grib1_pair,
+)
 from .platform_guard import require_native_windows
-from .validation import check_coverage, check_signature
+from .validation import check_coverage, check_signature, read_arl_times
 
 UTC = timezone.utc
-# The 12-layer pressure grid and 7-field surface sequence are compatible with
-# the locally verified HYSPLIT grib2arl.exe -g3 -p1 -k13 -q0 -z1 workflow.
-PRESSURE_LEVELS = (1000, 925, 850, 700, 600, 500,
-                   400, 300, 250, 200, 150, 100)
+ARCO_CONVERSION_VERSION = "arco-nc-v4-rh-q-floor-no-cutoff"
+ARCO_RH_POLICY_MARKER = "no magnitude or prevalence cutoff is applied"
+# The 37 official ERA5 pressure levels are preserved in HYSPLIT GRIB1.
+# Conversion uses a separate surface level: grib2arl -k38.
+PRESSURE_LEVELS = tuple(int(p) for p in ERA5_PRESSURE_LEVELS)
 PRESSURE_PARAMS = (
     ("geopotential", 129, "m2 s-2"),
     ("temperature", 130, "K"),
@@ -46,6 +56,170 @@ SURFACE_PARAMS = (
     ("boundary_layer_height", 159, "m"),
     ("geopotential_at_surface", 129, "m2 s-2"),
 )
+
+
+def estimate_grib1_pair_size_bytes(time_count: int, latitude_count: int,
+                                   longitude_count: int) -> int:
+    """Conservatively estimate ARCO GRIB1 bytes from grid and packed precision."""
+    if min(time_count, latitude_count, longitude_count) < 1:
+        raise ValueError("ARCO GRIB size estimate needs positive dimensions")
+    point_count = latitude_count * longitude_count
+    pressure_bits = sum(24 if param == 129 else 16 for _, param, _ in PRESSURE_PARAMS)
+    surface_bits = sum(24 if param == 129 else 16 for _, param, _ in SURFACE_PARAMS)
+    bits_per_hour = point_count * (
+        len(PRESSURE_LEVELS) * pressure_bits + surface_bits
+    )
+    payload_bytes = math.ceil(time_count * bits_per_hour / 8)
+    message_count = time_count * (
+        len(PRESSURE_LEVELS) * len(PRESSURE_PARAMS) + len(SURFACE_PARAMS)
+    )
+    # Add 5% for packing/padding and 4 KiB per message for GRIB metadata.
+    return math.ceil(payload_bytes * 1.05) + message_count * 4096
+
+
+def _cleanup_intermediates(
+    paths: list[Path], notify: Callable[[str], None] | None, outcome: str,
+) -> None:
+    removed_bytes = 0
+    removed_count = 0
+    failures: list[str] = []
+    seen: set[Path] = set()
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            path.unlink()
+            removed_bytes += size
+            removed_count += 1
+        except OSError as exc:
+            failures.append(f"{path.name}: {exc}")
+    if not notify:
+        return
+    if removed_count:
+        message = (
+            f"ARCO conversion intermediates removed {outcome}: {removed_count} files, "
+            f"{removed_bytes / (1024 ** 3):.2f} GiB freed"
+        )
+        try:
+            notify(message)
+        except Exception:
+            pass
+    if failures:
+        try:
+            notify("ARCO intermediate cleanup incomplete: " + "; ".join(failures))
+        except Exception:
+            pass
+
+
+def has_current_arco_conversion_policy(metadata: dict[str, object]) -> bool:
+    """Accept current ARL provenance and older metadata with the same RH rule."""
+    if metadata.get("conversion_version") == ARCO_CONVERSION_VERSION:
+        return True
+    quality = metadata.get("humidity_quality_control")
+    if not isinstance(quality, dict):
+        return False
+    policy = str(quality.get("policy", "")).casefold()
+    return ARCO_RH_POLICY_MARKER in policy
+
+
+def _cleanup_verified_cached_gribs(
+    target_dir: Path, filedates: Path,
+    notify: Callable[[str], None] | None,
+) -> None:
+    if _grib2arl_is_running():
+        if notify:
+            notify("ARCO GRIB cleanup skipped because grib2arl is still running")
+        return
+    obsolete: list[Path] = []
+    for output in target_dir.glob("arco_era5_*.arl"):
+        prefix = output.stem
+        pressure = target_dir / f"{prefix}_pressure.grib"
+        surface = target_dir / f"{prefix}_surface.grib"
+        if pressure.with_suffix(".grib.part").exists() or surface.with_suffix(
+            ".grib.part"
+        ).exists():
+            continue
+        if not (pressure.is_file() or surface.is_file()):
+            continue
+        try:
+            check_signature(output)
+            times = read_arl_times([output], filedates)
+            report = check_coverage(
+                [output], times[0], times[-1], filedates, max_gap_hours=1.01
+            )
+            if not report.verified:
+                continue
+        except Exception:
+            continue
+
+        obsolete.extend((
+            pressure, surface,
+            pressure.with_suffix(".grib.part"),
+            surface.with_suffix(".grib.part"),
+            pressure.with_suffix(".quality.json"),
+        ))
+    _cleanup_intermediates(obsolete, notify, "for verified ARL caches")
+
+
+def cleanup_verified_hysplit_netcdf_sources(
+    arl_dir: Path, source_dir: Path, filedates: Path, *,
+    notify: Callable[[str], None] | None = None,
+) -> tuple[int, int]:
+    """Remove HYSPLIT-only NetCDF sources only when their ARL cache is verified."""
+    arl_dir, source_dir, filedates = Path(arl_dir), Path(source_dir), Path(filedates)
+    if not filedates.is_file():
+        return 0, 0
+    if _grib2arl_is_running():
+        if notify:
+            notify("ARCO NetCDF cleanup skipped because grib2arl is still running")
+        return 0, 0
+    source_root = source_dir.resolve()
+    removed = 0
+    freed = 0
+    for metadata_path in arl_dir.glob("arco_era5_*.json"):
+        output = metadata_path.with_suffix(".arl")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            raw_source = Path(str(metadata["source"]))
+            if raw_source.is_symlink():
+                continue
+            source = raw_source.resolve()
+            if (source.parent != source_root
+                    or source.suffix.lower() != ".nc"
+                    or not source.name.lower().endswith("_hysplit.nc")
+                    or not source.is_file()
+                    or not output.is_file() or output.stat().st_size == 0):
+                continue
+            pressure = arl_dir / f"{output.stem}_pressure.grib"
+            surface = arl_dir / f"{output.stem}_surface.grib"
+            if pressure.with_suffix(".grib.part").exists() or surface.with_suffix(
+                ".grib.part"
+            ).exists():
+                # Another app instance may be exporting from this NetCDF.
+                continue
+            times = read_arl_times([output], filedates)
+            report = check_coverage(
+                [output], times[0], times[-1], filedates, max_gap_hours=1.01,
+            )
+            if not report.verified:
+                continue
+            size = source.stat().st_size
+            source.unlink()
+            removed += 1
+            freed += size
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            continue
+    if removed and notify:
+        notify(
+            f"Verified HYSPLIT-only ARCO NetCDF source removed: {removed} files, "
+            f"{freed / (1024 ** 3):.2f} GiB freed; verified ARL cache retained"
+        )
+    return removed, freed
 
 
 def _load_libraries():
@@ -140,6 +314,20 @@ def _check_field(field, pressure: bool):
 # 250.16 K to 273.16 K transition is consistent with Metview's q -> RH
 # definition, which uses e(q,p) / e_mixed_saturation(T).
 _EPSILON = 0.621981  # R_d / R_v, dry-air-to-water-vapour gas constant ratio
+def _clip_negative_specific_humidity_for_rh(specific_humidity, np):
+    """Floor negative q for derived RH only; leave the source data untouched.
+
+    Specific humidity cannot be negative physically. ARCO NetCDF values are
+    preserved as received; only the temporary array used to derive RH is floored.
+    Counts and the minimum negative value are reported for provenance.
+    """
+    q = np.asarray(specific_humidity, dtype=np.float64)
+    negative = np.isfinite(q) & (q < 0.0)
+    count = int(np.count_nonzero(negative))
+    if not count:
+        return q, 0, None
+    minimum = float(np.min(q[negative]))
+    return np.maximum(q, 0.0), count, minimum
 
 
 def relative_humidity_from_specific_humidity(
@@ -155,10 +343,20 @@ def relative_humidity_from_specific_humidity(
     q = np.asarray(specific_humidity, dtype=np.float64)
     if t.shape != q.shape or not t.size:
         raise ValueError("Specific humidity and temperature grids are incompatible")
-    if (not np.all(np.isfinite(t)) or not np.all(np.isfinite(q)) or
-            np.any(t < 150.0) or np.any(t > 350.0) or
-            np.any(q < 0.0) or np.any(q >= 1.0)):
-        raise ValueError("Invalid ERA5 specific humidity (kg/kg) or temperature (K)")
+    invalid_t = (~np.isfinite(t)) | (t <= 0.0)
+    invalid_q = (~np.isfinite(q)) | (q < 0.0) | (q >= 1.0)
+    if np.any(invalid_t) or np.any(invalid_q):
+        finite_t = t[np.isfinite(t)]
+        finite_q = q[np.isfinite(q)]
+        t_range = (f"[{float(finite_t.min()):.9g}, {float(finite_t.max()):.9g}] K"
+                   if finite_t.size else "no finite values")
+        q_range = (f"[{float(finite_q.min()):.9g}, {float(finite_q.max()):.9g}] kg/kg"
+                   if finite_q.size else "no finite values")
+        raise ValueError(
+            f"Invalid ERA5 humidity/temperature at {float(pressure_hpa):g} hPa: "
+            f"temperature range={t_range}, nonpositive/nonfinite={int(np.count_nonzero(invalid_t))}/{t.size}; "
+            f"specific_humidity range={q_range}, invalid={int(np.count_nonzero(invalid_q))}/{q.size}"
+        )
     p = float(pressure_hpa) * 100.0
     if not 0.0 < p <= 120000.0:
         raise ValueError("Invalid ERA5 isobaric pressure level")
@@ -232,7 +430,9 @@ def _encode_message(e, output, values, when: datetime, *,
 
 def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
                     surface_grib: Path,
-                    notify: Callable[[str], None] | None = None) -> tuple[datetime, datetime]:
+                    notify: Callable[[str], None] | None = None, *,
+                    quality_report: dict[str, object] | None = None
+                    ) -> tuple[datetime, datetime]:
     """Convert a validated ERA5 ARCO NetCDF regional subset to two GRIB1 files."""
     # Distinguish a broken PyInstaller module archive from meteorological
     # NetCDF corruption. The native backend loads CFFI/pycparser lazily.
@@ -285,10 +485,27 @@ def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
         if pressure_humidity == "specific_humidity" and notify:
             notify("Deriving RH [%] from ARCO specific_humidity [kg/kg], "
                    "temperature [K] and isobaric pressure [hPa]; mixed water/ice saturation")
+        if notify:
+            notify(
+                "GRIB1 packing precision: 16 bits/value, 24 bits for geopotential; "
+                "the NetCDF source is preserved and HYSPLIT grib2arl applies its "
+                "own ARL packing."
+            )
+        negative_q_total = 0
+        negative_q_samples = 0
+        negative_q_minimum: float | None = None
+        negative_q_by_level = {str(level): 0 for level in PRESSURE_LEVELS}
+        negative_q_max_slice_fraction = 0.0
         for name, _param, _units in SURFACE_PARAMS:
             if name not in ds:
                 raise ValueError(f"ARCO NetCDF missing surface variable {name}")
             _check_field(ds[name], False)
+        estimated_grib_bytes = estimate_grib1_pair_size_bytes(
+            len(times), len(lat), len(lon)
+        )
+        check_arco_conversion_space(
+            estimated_grib_bytes, pressure_grib, notify=notify,
+        )
         # Confirm grid coverage explicitly. No interpolation or extrapolation.
         with upper_tmp.open("wb") as upper, lower_tmp.open("wb") as lower:
             for i, when in enumerate(times):
@@ -304,6 +521,21 @@ def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
                             q = _load_slice(
                                 ds["specific_humidity"], i, lat_order, lon_order, np, level=level
                             )
+                            q, negative_count, negative_minimum = (
+                                _clip_negative_specific_humidity_for_rh(q, np)
+                            )
+                            negative_q_total += negative_count
+                            negative_q_samples += int(q.size)
+                            negative_q_by_level[str(level)] += negative_count
+                            negative_q_max_slice_fraction = max(
+                                negative_q_max_slice_fraction,
+                                negative_count / q.size,
+                            )
+                            if negative_minimum is not None:
+                                negative_q_minimum = (
+                                    negative_minimum if negative_q_minimum is None
+                                    else min(negative_q_minimum, negative_minimum)
+                                )
                             values = relative_humidity_from_specific_humidity(
                                 temperature, q, float(level), np
                             )
@@ -322,6 +554,35 @@ def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
             raise RuntimeError("ecCodes generated an empty GRIB1 file")
         upper_tmp.replace(pressure_grib)
         lower_tmp.replace(surface_grib)
+        if negative_q_total:
+            negative_q_fraction = negative_q_total / negative_q_samples
+            message = (
+                f"RH derivation: set {negative_q_total} negative specific_humidity "
+                f"values to 0 for RH derivation only (minimum="
+                f"{negative_q_minimum:.9g} kg/kg; overall={negative_q_fraction:.6%}, "
+                f"max level-hour={negative_q_max_slice_fraction:.6%}); "
+                f"source NetCDF unchanged"
+            )
+            if notify:
+                notify(message)
+        if quality_report is not None:
+            quality_report.update({
+                "negative_specific_humidity_values_set_to_zero_for_rh": negative_q_total,
+                "minimum_negative_specific_humidity_kg_kg": negative_q_minimum,
+                "negative_specific_humidity_fraction_overall": (
+                    negative_q_total / negative_q_samples if negative_q_samples else 0.0
+                ),
+                "negative_specific_humidity_max_fraction_per_level_time_slice": (
+                    negative_q_max_slice_fraction
+                ),
+                "by_pressure_level_hpa": negative_q_by_level,
+                "policy": (
+                    "For RH derivation only, all negative q values are floored to zero; "
+                    "source NetCDF values are preserved and correction counts/minima "
+                    "are recorded. No magnitude or prevalence cutoff is applied."
+                ),
+                "source_netcdf_modified": False,
+            })
         return times[0], times[-1]
     finally:
         ds.close()
@@ -346,47 +607,201 @@ def convert_arco_netcdf_to_arl(netcdf: Path, target_dir: Path,
             raise FileNotFoundError(f"Native HYSPLIT decoder missing: {path}")
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    ident = f"{netcdf.resolve()}|{netcdf.stat().st_size}|{netcdf.stat().st_mtime_ns}|arco_nc_v1"
+    _cleanup_verified_cached_gribs(target_dir, filedates, notify)
+    ident = (
+        f"{netcdf.resolve()}|{netcdf.stat().st_size}|{netcdf.stat().st_mtime_ns}|"
+        f"{PRESSURE_LEVELS}|{PRESSURE_PARAMS}|{SURFACE_PARAMS}"
+    )
     token = hashlib.sha256(ident.encode("utf-8")).hexdigest()[:16]
     output = target_dir / f"arco_era5_{token}.arl"
-    if output.is_file() and output.stat().st_size > 0:
-        check_signature(output)
-        check_coverage([output], earliest, latest, filedates, max_gap_hours=1.01)
-        if notify:
-            notify(f"ARCO ARL cache verified: {output.name}")
-        return [output]
     pressure = target_dir / f"arco_era5_{token}_pressure.grib"
     surface = target_dir / f"arco_era5_{token}_surface.grib"
-    if not (pressure.is_file() and surface.is_file()):
-        netcdf_to_grib1(netcdf, pressure, surface, notify)
-    # Preserve provenance: GRIB1 outputs RH parameter 157 in either case,
-    # but the field is derived when the input supplies specific humidity.
-    import xarray as xr
-    with xr.open_dataset(netcdf, engine="netcdf4") as nc:
-        humidity_input = ("relative_humidity" if "relative_humidity" in nc.data_vars
-                          else "specific_humidity" if "specific_humidity" in nc.data_vars
-                          else "unknown")
-    from .native_era5 import run_native_grib1_pair
-    staged = run_native_grib1_pair(
-        pressure, surface, output, converter, level_count=13, notify=notify
-    )
+    quality_path = pressure.with_suffix(".quality.json")
+    staged = output.with_suffix(output.suffix + ".part")
+    cleanup_paths = [
+        pressure, surface,
+        pressure.with_suffix(".grib.part"),
+        surface.with_suffix(".grib.part"),
+        quality_path,
+        staged,
+    ]
+    arl_validated = False
+    preserve_staged = False
     try:
-        report = check_coverage([staged], earliest, latest, filedates, max_gap_hours=1.01)
-        if not report.verified:
-            raise RuntimeError("ARCO ARL valid-hour verification did not complete")
+        if output.is_file() and output.stat().st_size > 0:
+            check_signature(output)
+            report = check_coverage(
+                [output], earliest, latest, filedates, max_gap_hours=1.01
+            )
+            arl_validated = True
+            if notify:
+                notify(
+                    f"ARCO ARL cache verified by filedates; existing ARL reused as-is: "
+                    f"{output.name}"
+                )
+                cached_metadata = {}
+                try:
+                    value = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
+                    if isinstance(value, dict):
+                        cached_metadata = value
+                except (OSError, UnicodeError, ValueError, TypeError):
+                    pass
+                if not has_current_arco_conversion_policy(cached_metadata):
+                    notify(
+                        "ARL RH conversion metadata is missing or differs from this app; "
+                        "the validated ARL is being used unchanged."
+                    )
+            return [output]
+
+        humidity_quality: dict[str, object] = {}
+        reused_cached_gribs = False
+        if quality_path.is_file():
+            try:
+                cached_quality = json.loads(quality_path.read_text(encoding="utf-8"))
+                if isinstance(cached_quality, dict):
+                    humidity_quality.update(cached_quality)
+            except (OSError, ValueError, TypeError):
+                humidity_quality.clear()
+        recovered_staged = staged.is_file()
+        humidity_input = "unknown"
+        if recovered_staged:
+            try:
+                report = check_coverage(
+                    [staged], earliest, latest, filedates, max_gap_hours=1.01,
+                )
+                if not report.verified:
+                    raise RuntimeError("filedates did not verify staged ARL time coverage")
+            except Exception as exc:
+                preserve_staged = True
+                raise RuntimeError(
+                    f"Existing staged ARCO ARL was preserved and no conversion was "
+                    f"restarted: {staged}. filedates verification failed: {exc}"
+                ) from exc
+            if notify:
+                notify(
+                    f"Reusing staged ARCO ARL after filedates verification: "
+                    f"{staged.name}; no GRIB/ARL reconversion"
+                )
+            if netcdf.is_file():
+                import xarray as xr
+                with xr.open_dataset(netcdf, engine="netcdf4") as nc:
+                    humidity_input = (
+                        "relative_humidity" if "relative_humidity" in nc.data_vars
+                        else "specific_humidity" if "specific_humidity" in nc.data_vars
+                        else "unknown"
+                    )
+        else:
+            pressure_exists = pressure.is_file()
+            surface_exists = surface.is_file()
+            if pressure_exists and surface_exists:
+                require_grib1(pressure)
+                require_grib1(surface)
+                reused_cached_gribs = True
+                if not humidity_quality and notify:
+                    notify(
+                        "Reusing the existing ARCO pressure/surface GRIB pair without "
+                        "reconversion; RH-quality JSON is missing, so its historical "
+                        "RH derivation details are unknown."
+                    )
+            else:
+                if pressure_exists != surface_exists:
+                    existing = pressure if pressure_exists else surface
+                    require_grib1(existing)
+                    if notify:
+                        notify(
+                            "Only one completed ARCO GRIB was present. Preserving it "
+                            "until a complete replacement pair is generated from the "
+                            "existing local NetCDF; no ERA5 download is needed."
+                        )
+                orphan_parts = [path for path in (
+                    pressure.with_suffix(".grib.part"),
+                    surface.with_suffix(".grib.part"),
+                ) if path.is_file()]
+                if orphan_parts and notify:
+                    notify(
+                        "Removing interrupted, incomplete GRIB staging files and "
+                        "rebuilding from the existing local NetCDF; no network "
+                        "download is needed: "
+                        + ", ".join(path.name for path in orphan_parts)
+                    )
+                netcdf_to_grib1(netcdf, pressure, surface, notify,
+                                quality_report=humidity_quality)
+                quality_path.write_text(
+                    json.dumps(humidity_quality, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            # Preserve provenance: GRIB1 outputs RH parameter 157 in either case,
+            # but the field is derived when the input supplies specific humidity.
+            import xarray as xr
+            with xr.open_dataset(netcdf, engine="netcdf4") as nc:
+                humidity_input = (
+                    "relative_humidity" if "relative_humidity" in nc.data_vars
+                    else "specific_humidity" if "specific_humidity" in nc.data_vars
+                    else "unknown"
+                )
+            from .native_era5 import run_native_grib1_pair
+            staged = run_native_grib1_pair(
+                pressure, surface, output, converter,
+                level_count=len(PRESSURE_LEVELS)+1, notify=notify
+            )
+            report = check_coverage(
+                [staged], earliest, latest, filedates, max_gap_hours=1.01,
+            )
+            if not report.verified:
+                raise RuntimeError("ARCO ARL valid-hour verification did not complete")
         staged.replace(output)
+        arl_validated = True
         metadata = {
+            # A cached GRIB or staged ARL was not converted with this invocation.
+            # Do not label historical bytes with the current app's policy.
+            "conversion_version": (
+                ARCO_CONVERSION_VERSION
+                if not recovered_staged and not reused_cached_gribs else None
+            ),
+            "recovered_staged_arl": recovered_staged,
+            "reused_cached_gribs_without_quality_json": (
+                reused_cached_gribs and not bool(humidity_quality)
+            ),
             "source": str(netcdf), "format": "ERA5 ARCO 0.25 degree NetCDF",
             "intermediate_pressure_grib": str(pressure),
             "intermediate_surface_grib": str(surface),
-            "grib_edition": 1, "pressure_levels_hpa": list(PRESSURE_LEVELS),
+            "intermediate_grib_cleanup": "attempted after ARL validation",
+            "grib_edition": None if recovered_staged else 1,
+            "pressure_levels_hpa": None if recovered_staged else list(PRESSURE_LEVELS),
+            "grib1_bits_per_value": None if recovered_staged or reused_cached_gribs else {
+                "default": 16,
+                "geopotential_param_id_129": 24,
+                "note": "GRIB packing; source NetCDF preserved; ARL is packed by grib2arl",
+            },
+            "hysplit_total_vertical_layers": (
+                None if recovered_staged else len(PRESSURE_LEVELS) + 1
+            ),
             "humidity_input": humidity_input,
             "humidity_output": "relative_humidity (%) / ECMWF GRIB1 paramId=157",
             "humidity_derivation": (
-                "q,T,p -> RH; ECMWF mixed water/ice saturation formula"
+                "not recorded; staged/cached data reused after time verification"
+                if recovered_staged or reused_cached_gribs
+                else "q,T,p -> RH; ECMWF mixed water/ice saturation formula"
                 if humidity_input == "specific_humidity"
                 else "direct relative_humidity field"
+                if humidity_input == "relative_humidity"
+                else "not recorded; staged/cached data reused after time verification"
             ),
+            "humidity_quality_control": humidity_quality or ({
+                "policy": "not recorded; staged ARL or cached GRIB pair reused unchanged"
+            } if recovered_staged or reused_cached_gribs else {
+                "negative_specific_humidity_values_set_to_zero_for_rh": 0,
+                "minimum_negative_specific_humidity_kg_kg": None,
+                "negative_specific_humidity_fraction_overall": 0.0,
+                "negative_specific_humidity_max_fraction_per_level_time_slice": 0.0,
+                "by_pressure_level_hpa": {},
+                "policy": (
+                    "For RH derivation only, all negative q values are floored to zero; "
+                    "source NetCDF values are preserved and correction counts/minima "
+                    "are recorded. No magnitude or prevalence cutoff is applied."
+                ),
+                "source_netcdf_modified": False,
+            }),
             "time_count": report.time_count,
             "first": report.first.isoformat() if report.first else None,
             "last": report.last.isoformat() if report.last else None,
@@ -397,5 +812,23 @@ def convert_arco_netcdf_to_arl(netcdf: Path, target_dir: Path,
         )
         return [output]
     finally:
-        staged.unlink(missing_ok=True)
+        outcome = "after ARL validation" if arl_validated else "after conversion stopped"
+        if arl_validated:
+            _cleanup_intermediates(cleanup_paths, notify, outcome)
+        else:
+            # Complete GRIBs are reusable conversion inputs. Keeping them after
+            # a failed ARL conversion avoids repeating the expensive NetCDF scan
+            # on restart. Incomplete GRIB/staging fragments are discarded.
+            incomplete = [
+                pressure.with_suffix(".grib.part"),
+                surface.with_suffix(".grib.part"),
+            ]
+            if not preserve_staged:
+                incomplete.append(staged)
+            _cleanup_intermediates(incomplete, notify, outcome)
+            if pressure.is_file() and surface.is_file() and notify:
+                notify(
+                    "Complete ARCO GRIB inputs and RH provenance were retained for "
+                    "the next local retry; no ERA5 download or GRIB regeneration is needed."
+                )
 

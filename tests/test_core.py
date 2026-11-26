@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hysplit_tool.core import (
-    StartPoint, execute_groups, expand_starts, fixed_starts, group_starts,
+    StartPoint, automatic_worker_count, execute_groups, expand_starts, fixed_starts, group_starts,
     load_starts_csv, parse_heights, parse_time_offsets, parse_utc,
     parse_xy_offsets, render_control, write_group,
 )
@@ -18,6 +18,12 @@ UTC = timezone.utc
 
 
 class TestCore(unittest.TestCase):
+    def test_automatic_worker_count_is_bounded_by_cpus_tasks_and_cap(self):
+        self.assertEqual(automatic_worker_count(20,cpu_count=4),3)
+        self.assertEqual(automatic_worker_count(1,cpu_count=16),1)
+        self.assertEqual(automatic_worker_count(20,cpu_count=32),8)
+        self.assertEqual(automatic_worker_count(20,cpu_count=1),1)
+
     def test_parse_heights_inclusive(self):
         values = parse_heights("500:10000:100")
         self.assertEqual((len(values), values[0], values[-1]), (96, 500, 10000))

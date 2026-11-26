@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -53,6 +54,51 @@ def parse_filedates(text: str) -> tuple[datetime, ...]:
     return tuple(sorted(dates))
 
 
+def read_arl_times(met_paths: list[Path], filedates: Path) -> tuple[datetime, ...]:
+    """Read valid times from ARLs without consulting sidecar metadata."""
+    utility = Path(filedates)
+    if not utility.is_file():
+        raise FileNotFoundError(f"NOAA filedates utility not found: {utility}")
+    paths = [Path(path) for path in met_paths]
+    if not paths:
+        raise ValueError("No meteorological files selected")
+    times = set()
+    for path in paths:
+        absolute_path = path.resolve()
+        stat = absolute_path.stat()
+        utility_path = utility.resolve()
+        utility_stat = utility_path.stat()
+        discovered = _read_one_arl_times(
+            str(absolute_path), stat.st_size, stat.st_mtime_ns,
+            str(utility_path), utility_stat.st_mtime_ns,
+        )
+        if not discovered:
+            raise ValueError(f"filedates could not identify any periods in {path.name}.")
+        times.update(discovered)
+    return tuple(sorted(times))
+
+
+@lru_cache(maxsize=256)
+def _read_one_arl_times(
+    path_text: str, size: int, modified_ns: int,
+    utility_text: str, utility_modified_ns: int,
+) -> tuple[datetime, ...]:
+    """Cache filedates results by ARL and utility file identity within a run."""
+    del size, modified_ns, utility_modified_ns  # Identity fields form the cache key.
+    path = Path(path_text)
+    utility = Path(utility_text)
+    check_signature(path)
+    result = subprocess.run(
+        [str(utility), path.name], cwd=path.parent,
+        capture_output=True, text=True, errors="replace",
+    )
+    if result.returncode:
+        raise RuntimeError(
+            f"filedates failed for {path.name}: {result.stderr.strip()[:400]}"
+        )
+    return parse_filedates(result.stdout)
+
+
 def check_coverage(met_paths: list[Path], earliest: datetime, latest: datetime,
                    filedates: Path | None = None, *, max_gap_hours: float = 6) -> CoverageReport:
     """Inspect all meteorological timestamps when NOAA filedates is available.
@@ -69,32 +115,18 @@ def check_coverage(met_paths: list[Path], earliest: datetime, latest: datetime,
     paths = [Path(p) for p in met_paths]
     if not paths:
         raise ValueError("No meteorological files selected")
-    for path in paths:
-        check_signature(path)
     if filedates is None or not Path(filedates).is_file():
         return CoverageReport(False, ("NOAA filedates utility not installed: ARL timestamps unverified.",))
-    times = set()
-    for path in paths:
-        # NOAA's Windows filedates.exe opens an ARL basename in its current
-        # directory; passing an absolute input path can fail with code 900.
-        absolute_path = path.resolve()
-        result = subprocess.run([str(Path(filedates).resolve()), absolute_path.name],
-                                cwd=absolute_path.parent,
-                                capture_output=True, text=True, errors="replace", timeout=180)
-        if result.returncode:
-            raise RuntimeError(f"filedates failed for {path.name}: {result.stderr.strip()[:400]}")
-        discovered = parse_filedates(result.stdout)
-        if not discovered:
-            raise ValueError(f"filedates could not identify any periods in {path.name}.")
-        times.update(discovered)
-    ordered = sorted(times)
-    if ordered[0] > earliest or ordered[-1] < latest:
-        raise ValueError(
-            f"ARL time coverage insufficient: {ordered[0].isoformat()} to "
-            f"{ordered[-1].isoformat()}; required {earliest.isoformat()} to {latest.isoformat()}"
-        )
+    ordered = read_arl_times(paths, Path(filedates))
     useful = [t for t in ordered if earliest - timedelta(hours=max_gap_hours) <= t
               <= latest + timedelta(hours=max_gap_hours)]
+    if not useful or useful[0] > earliest or useful[-1] < latest:
+        raise ValueError(
+            f"ARL time coverage insufficient near requested window: "
+            f"{useful[0].isoformat() if useful else 'no nearby valid times'} to "
+            f"{useful[-1].isoformat() if useful else 'no nearby valid times'}; "
+            f"required {earliest.isoformat()} to {latest.isoformat()}"
+        )
     gaps = [(a, b) for a, b in zip(useful, useful[1:]) if
             (b - a).total_seconds() > max_gap_hours * 3600]
     if gaps:

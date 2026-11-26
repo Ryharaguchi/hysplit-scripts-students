@@ -2,30 +2,30 @@
 ====================================================
 
 1. ZIPをPCのフォルダに展開してください。
-   HYSPLIT_Batch\HYSPLIT_Batch.exe をダブルクリックして起動します。
+   展開先フォルダの HYSPLIT_Batch.exe をダブルクリックして起動します。
    HYSPLIT_Batch.exeだけを取り出さず、_internalフォルダも一緒に保持してください。
 
 2. Python、WSL、PowerShell、Gitなどの開発環境は不要です。
    Windows 10/11 (64ビット) を想定しています。Windows以外には対応しません。
 
-3. GUI単体のZIPにはNOAAのHYSPLIT本体は含まれていません。
-   同じ利用者のPC間移動用H:の「配布」には
-   HYSPLIT_Batchの隣にHYSPLIT/execとbdyfilesを配置します。
-   NOAA HYSPLIT利用規約により、許可のない再配布が禁止されています。
-   「配布」を全体ごとデスクトップにコピーすると、GUIが隣の
-   HYSPLIT/exec/hyts_std.exeを自動検出します。
-   通常は C:\hysplit\exec\hyts_std.exe です。
-   正式なHYSPLITインストールには exec / bdyfiles 等のフォルダが必要です。
-   HYSPLIT本体と気象ファイルの配布・コピーはNOAAの利用条件に従ってください。
+3. この統合ZIPにはアプリとHYSPLIT本体が含まれます。
+   展開後、HYSPLIT\exec\hyts_std.exe、grib2arl.exe、filedates.exeと
+   HYSPLIT\bdyfilesが同じフォルダ内にあることを確認してください。
+   アプリは隣接するHYSPLIT\exec\hyts_std.exeを自動検出します。
+   ZIP全体を展開し、HYSPLIT_Batch.exeだけを別の場所へ移動しないでください。
+   NOAAの使用条件に従って利用してください。
 
    NOAA公式ダウンロード:
    https://www.arl.noaa.gov/hysplit/getrun-hysplit/
    NOAA使用・配布規約:
-   https://hysplit2.arl.noaa.gov/HYSPLIT_agreement.php
+   https://www.ready.noaa.gov/HYSPLIT_agreement.php
 
 4. データ出力先の初期値:
    Windowsデスクトップ\HYSPLIT_Work
    保存先はGUIから変更できます。D:ドライブは必須ではありません。
+
+   入力した計算条件は実行開始時とアプリ終了時にこのPCのユーザー設定へ保存され、
+   次回起動時に復元されます。気象データや計算結果は引き続きHYSPLIT_Workに保存します。
 
 5. samplesフォルダにJST時刻の観測CSVの例があります。
    4列: 時刻(JST)、緯度、経度、高度(m)。
@@ -37,7 +37,7 @@
    ローカルARL:
       PCに保存されている既存のARL気象ファイルを指定。
    ERA5 CDS (0.25°):
-      Copernicus CDSへの登録、利用規約同意、API設定が別途必要。
+      Copernicus CDSへの登録・利用規約同意・API認証設定とcdsapiが別途必要。
    ERA5 Google ARCO (0.25°):
       Google Cloudの公開ZarrからNetCDFを取得し、Windowsの同梱Python
       ecCodesでGRIB1化。HYSPLITに付属のgrib2arl.exeでARLへ変換。
@@ -46,7 +46,7 @@
 
 7. 流跡線の出力間隔はGUIで1～1,440分から指定できます（初期値10分）。
    内部計算時間刻みは通常自動（DELT=0）。固定値は詳細設定から指定します。
-   1回の計算結果は runs\<実行ID>\trajectories.csv にまとめられます。
+   計算結果は runs\<実行ID>\Trajectory_period_*.csv として期間ごとに出力されます。
    各計算フォルダのtdumpやMESSAGEも、再現性確認用に残ります。
 
 8. 依存ライブラリの診断方法:
@@ -110,6 +110,18 @@
     約154MB（展開後）のデータ読み込みが必要です。
     更新版は1時間・1変数ずつ処理し、X/Y時間をGUIに表示します。
     途中で中断した場合も検証済みの部分NetCDFから再開できます。
+    検証済みARLを作成した後、CDS/ARCOのGRIB中間ファイルを自動削除します。
+    検証済みARLは再利用用に保持します。CDSは再利用メタデータからARLを再利用し、
+    GRIBを再取得しません。ARCOのHYSPLIT専用NetCDFはARL検証後に削除し、
+    全変数モードのNetCDFは保持します。ARL検証に失敗した場合はNetCDFを残します。
+    変換前に空き容量を確認し、不足時は大容量の変換を開始しません。
+    強制終了で残った変換作業フォルダは、次回実行時にgrib2arl.exeが
+    動作していないことを確認してから自動回収します。
+    計算が全期間成功すると、入力CSV・結果CSV・地図・GeoJSON・manifestと
+    再計算用の検証済みARL・メタデータを残し、計算グループの作業フォルダと
+    変換元NetCDF/GRIBを整理します。元データを再変換用に残す場合は
+    GUIの「ERA5の変換元NetCDF/GRIBも残す」を選択します。
+    途中失敗時は、再開・原因確認に使う作業ファイルを保持します。
     ただし通信量が大きい問題自体は残ります。
     数日間の地域データにはERA5 CDS（認証が必要）も検討してください。
 
@@ -121,3 +133,28 @@
     この診断ではecCodesの本物のGRIB1メッセージも生成します。
     コピー元Google Driveの同期終了を確認してください。
     観測CSVや計算済みデータを削除する必要はありません。
+
+21. ERA5取得は北半球全域（0～90°N、全経度）0.25°×37気圧面（1000～1 hPa）。
+    ERA5は「HYSPLIT必須項目のみ（6気圧面+7地上）」または
+    「全変数」を選択できます。必須項目のみでも37気圧面を維持します。
+    CDSの全変数はこのアプリ指定の16気圧面+7地上変数、
+    ARCOの全変数は公開Zarrの全収録変数です。全変数モードは大容量です。
+    CDSを使うにはCopernicus CDSの利用登録・規約同意・API認証設定が必要です。
+    HYSPLIT変換は37気圧面+地表の38層指定です。
+    モデル上端はGUIで指定可。空欄ならERA5 50km AGL、
+    その他25km AGLまたは開始高度+1kmの高い方です。
+    北半球保存も大容量です。必要なローカル保存容量を確保してください。
+
+22. 旧データ・実行中ジョブへの影響:
+    旧地域限定・12層NetCDF等は削除しません。ただし未保存の
+    北半球で未保存の格子・追加気圧面・変数は新たな取得が必要です。
+    元のGoogle全球Zarrチャンクは永続保存されていません。
+    既存の全球・旧版キャッシュは削除せず、新しい北半球キャッシュと区別します。
+    実行中アプリは変更せず、実行終了後に新しいGUIを導入してください。
+
+23. Windows grib2arl.exe がCFG_ARL読込時に一時失敗した場合:
+    同じGRIBを新しい一時フォルダで1回だけ自動再試行します。
+    失敗が続く場合は、変換ログにMESSAGEとCFG_ARLの診断情報を残します。
+    成功時に変換器の警告があればGUIログにも表示します。
+    surface pressure not found / estimated from terrain height の警告は、
+    地表気圧がARLに入らず地形から推定されることを示します。
