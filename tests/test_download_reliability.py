@@ -13,7 +13,8 @@ from unittest.mock import patch
 from hysplit_tool.meteo import (
     RemoteFile, download_arl_file, plan_archives, _download_error_hint,
 )
-from hysplit_tool.era5 import download_google_arco
+from hysplit_tool.era5_materialize import Era5Materializer
+from hysplit_tool.time_windows import TimeWindow
 
 UTC=timezone.utc
 
@@ -144,12 +145,17 @@ class TestArcoCache(unittest.TestCase):
         b=datetime(2019,1,5,1,tzinfo=UTC)
         bbox=(35.25,134.75,35.0,135.0)
         with tempfile.TemporaryDirectory() as td:
+            def acquire():
+                root=Path(td)
+                m=Era5Materializer("arco_era5",root,bbox,root/"unused.exe","allvars",True,lambda _:None)
+                try:return m.prepare(TimeWindow(a,b),action="download")
+                finally:m.close()
             with patch("xarray.open_zarr",return_value=ds):
-                original=download_google_arco(a,b,Path(td),bbox)
-            self.assertTrue(original.is_file())
+                original=acquire()
+            self.assertTrue(original[0].is_file())
             with patch("xarray.open_zarr",side_effect=RuntimeError(
                 "Network unavailable on this Windows PC")) as mocked:
-                reused=download_google_arco(a,b,Path(td),bbox)
+                reused=acquire()
             self.assertEqual(reused,original)
             mocked.assert_not_called()
 

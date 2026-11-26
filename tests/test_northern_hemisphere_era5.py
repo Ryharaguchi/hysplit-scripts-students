@@ -9,7 +9,7 @@ from unittest.mock import patch
 from hysplit_tool.era5 import (
     NORTHERN_HEMISPHERE_BBOX, GLOBAL_ERA5_BBOX,
     PRESSURE_LEVELS, ARCO_PRESSURE_LEVELS, ARCO_PRESSURE_FIELDS,
-    ARCO_SURFACE_FIELDS, download_cds,download_google_arco
+    ARCO_SURFACE_FIELDS, download_cds
 )
 UTC=timezone.utc
 
@@ -80,9 +80,14 @@ class TestNorthernHemisphere(unittest.TestCase):
             self.assertIn("specific_humidity",selected.data_vars)
             return path
         with tempfile.TemporaryDirectory() as td:
-            with patch("xarray.open_zarr",return_value=ds),patch("hysplit_tool.arco_stream.export_hourly_netcdf",side_effect=fake_export):
-                p=download_google_arco(datetime(2019,1,5,tzinfo=UTC), datetime(2019,1,5,1,tzinfo=UTC),Path(td),NORTHERN_HEMISPHERE_BBOX)
-            self.assertTrue(p.name.endswith("_northern37_allvars.nc"))
+            with patch("xarray.open_zarr",return_value=ds),patch("hysplit_tool.era5_materialize.export_hourly_netcdf",side_effect=fake_export):
+                from hysplit_tool.era5_materialize import Era5Materializer
+                from hysplit_tool.time_windows import TimeWindow
+                m=Era5Materializer("arco_era5",Path(td),NORTHERN_HEMISPHERE_BBOX,Path(td)/"unused.exe","allvars",True,lambda _:None)
+                try:
+                    paths=m.prepare(TimeWindow(datetime(2019,1,5,tzinfo=UTC),datetime(2019,1,5,1,tzinfo=UTC)),action="download")
+                finally:m.close()
+            self.assertTrue(paths[0].name.endswith("_allvars.nc"))
         self.assertEqual(len(extracted),1)
 
 if __name__=="__main__":

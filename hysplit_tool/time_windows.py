@@ -1,4 +1,4 @@
-﻿"""Non-contiguous UTC meteorological windows for unattended trajectory batches.
+"""Non-contiguous UTC meteorological windows for unattended trajectory batches.
 
 All user-visible run identifiers are JST; meteorological validity and HYSPLIT
 CONTROL times remain UTC. Each trajectory needs only its own backward window.
@@ -70,29 +70,3 @@ def find_window(windows: Iterable[TimeWindow], start: datetime,
         if window.start <= needed.start and window.end >= needed.end:
             return window
     raise ValueError(f"No meteorological window covers {start.isoformat()}")
-
-
-def split_window(
-    window: TimeWindow,
-    *,
-    max_span: timedelta = timedelta(days=13),
-    overlap: timedelta = timedelta(hours=1),
-) -> tuple[TimeWindow, ...]:
-    """Split a long period into resumable local work chunks with overlap.
-
-    This is an application-side disk/recovery strategy, not a remote ARCO API
-    limit. The overlap keeps the edge hours available to HYSPLIT interpolation.
-    """
-    if max_span <= timedelta(0) or overlap < timedelta(0) or overlap >= max_span:
-        raise ValueError("Invalid chunk duration or overlap")
-    if window.end - window.start <= max_span:
-        return (window,)
-    chunks: list[TimeWindow] = []
-    start = window.start
-    while start < window.end:
-        end = min(start + max_span, window.end)
-        chunks.append(TimeWindow(start, end))
-        if end == window.end:
-            break
-        start = end - overlap
-    return tuple(chunks)

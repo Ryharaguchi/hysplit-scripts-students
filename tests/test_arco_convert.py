@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from hysplit_tool.arco_convert import (
     PRESSURE_LEVELS, PRESSURE_PARAMS, SURFACE_PARAMS,
-    cleanup_verified_hysplit_netcdf_sources, estimate_grib1_pair_size_bytes,
+    estimate_grib1_pair_size_bytes,
 )
 from hysplit_tool.core import StartPoint, automatic_model_top
 from hysplit_tool.validation import CoverageReport
@@ -48,80 +48,32 @@ class TestModelTop(unittest.TestCase):
 
 
 class TestArcoCacheCleanup(unittest.TestCase):
-    def test_only_verified_hysplit_netcdf_source_is_removed(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            arl_dir = root / "arl"
-            arl_dir.mkdir()
-            filedates = root / "filedates.exe"
-            filedates.write_bytes(b"stub")
-            first = datetime(2026, 6, 2, 10, tzinfo=timezone.utc)
-            last = datetime(2026, 6, 5, 11, tzinfo=timezone.utc)
-            source = root / "arco_era5_20260602T1025_20260605T1135_northern37_hysplit.nc"
-            source.write_bytes(b"netcdf")
-            output = arl_dir / "arco_era5_cache.arl"
-            output.write_bytes(b"arl")
-            metadata = {
-                "source": str(source),
-                "pressure_levels_hpa": list(PRESSURE_LEVELS),
-                "first": first.isoformat(),
-                "last": last.isoformat(),
-                "time_count": 76,
-                "validation": "NOAA Windows filedates (timestamps only)",
-                "humidity_quality_control": {
-                    "policy": "Negative q is floored only for RH. "
-                             "No magnitude or prevalence cutoff is applied."
-                },
-            }
-            output.with_suffix(".json").write_text(
-                json.dumps(metadata), encoding="utf-8",
-            )
-            allvars = root / "arco_era5_20260602T1025_20260605T1135_northern37_allvars.nc"
-            allvars.write_bytes(b"archive")
+    def test_only_new_sources_are_removed_after_verified_conversion(self):
+        from hysplit_tool.era5_materialize import Era5Materializer
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            m=Era5Materializer("arco_era5",root,(90,-180,0,180),root/"hyts_std.exe",
+                               "hysplit",False,lambda _:None)
+            old=root/"original.nc";new=root/"new.nc";grib=root/"generated.grib"
+            for path in (old,new,grib):path.write_bytes(b"data")
+            m.created_sources.add(new.resolve())
+            m.created_gribs.add(grib.resolve())
+            m._cleanup_created((old,new,grib))
+            self.assertTrue(old.exists())
+            self.assertFalse(new.exists())
+            self.assertFalse(grib.exists())
 
-            with patch(
-                "hysplit_tool.arco_convert.check_coverage",
-                return_value=CoverageReport(True, ("verified",), first, last, 76),
-            ):
-                removed, freed = cleanup_verified_hysplit_netcdf_sources(
-                    arl_dir, root, filedates,
-                )
-            self.assertEqual((removed, freed), (1, len(b"netcdf")))
-            self.assertFalse(source.exists())
-            self.assertTrue(allvars.exists())
-
-    def test_old_rh_policy_does_not_authorize_netcdf_deletion(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            arl_dir = root / "arl"
-            arl_dir.mkdir()
-            filedates = root / "filedates.exe"
-            filedates.write_bytes(b"stub")
-            first = datetime(2026, 6, 2, 10, tzinfo=timezone.utc)
-            last = datetime(2026, 6, 5, 11, tzinfo=timezone.utc)
-            source = root / "arco_era5_20260602T1025_20260605T1135_northern37_hysplit.nc"
-            source.write_bytes(b"netcdf")
-            output = arl_dir / "arco_era5_old_policy.arl"
-            output.write_bytes(b"arl")
-            output.with_suffix(".json").write_text(json.dumps({
-                "source": str(source),
-                "pressure_levels_hpa": list(PRESSURE_LEVELS),
-                "first": first.isoformat(),
-                "last": last.isoformat(),
-                "time_count": 76,
-                "validation": "NOAA Windows filedates (timestamps only)",
-                "humidity_quality_control": {"policy": "legacy cutoff"},
-            }), encoding="utf-8")
-
-            with patch(
-                "hysplit_tool.arco_convert.check_coverage",
-                return_value=CoverageReport(True, ("verified",), first, last, 76),
-            ):
-                removed, freed = cleanup_verified_hysplit_netcdf_sources(
-                    arl_dir, root, filedates,
-                )
-            self.assertEqual((removed, freed), (0, 0))
-            self.assertTrue(source.exists())
+    def test_full_archive_and_keep_sources_never_delete_raw_source(self):
+        from hysplit_tool.era5_materialize import Era5Materializer
+        for profile,keep in (("allvars",False),("hysplit",True)):
+            with self.subTest(profile=profile,keep=keep), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                source=root/"archive.nc";source.write_bytes(b"data")
+                m=Era5Materializer("arco_era5",root,(90,-180,0,180),root/"hyts_std.exe",
+                                   profile,keep,lambda _:None)
+                m.created_sources.add(source.resolve())
+                m._cleanup_created((source,))
+                self.assertTrue(source.exists())
 
 
 @unittest.skipUnless(HAS_LIBS, "Windows ecCodes, xarray, numpy and netCDF4 optional")

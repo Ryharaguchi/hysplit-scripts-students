@@ -1,4 +1,4 @@
-﻿"""Regression for Google ARCO having q instead of relative_humidity.
+"""Regression for Google ARCO having q instead of relative_humidity.
 
 Windows-native optional ecCodes/xarray test; no network, HYSPLIT executable or
 remote Google download is required for these deterministic unit tests.
@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from hysplit_tool.era5 import download_google_arco
+from hysplit_tool.era5_materialize import Era5Materializer
+from hysplit_tool.time_windows import TimeWindow
 from hysplit_tool.arco_convert import (
     PRESSURE_LEVELS, PRESSURE_PARAMS, SURFACE_PARAMS,
     relative_humidity_from_specific_humidity,
@@ -103,7 +104,7 @@ class TestArcoSpecificHumidity(unittest.TestCase):
         import numpy as np
         with self.assertRaisesRegex(
             ValueError,
-            r"1000 hPa: temperature range=\[280, 280\] K, invalid=0/1; "
+            r"1000 hPa: temperature range=\[280, 280\] K, nonpositive/nonfinite=0/1; "
             r"specific_humidity range=\[-0\.001, -0\.001\] kg/kg, invalid=1/1",
         ):
             relative_humidity_from_specific_humidity(
@@ -138,12 +139,12 @@ class TestArcoSpecificHumidity(unittest.TestCase):
             self.assertNotIn("relative_humidity", ds)
             notices=[]
             with patch("xarray.open_zarr", return_value=ds) as mocked:
-                output=download_google_arco(
-                    datetime(2019,1,5,0,tzinfo=timezone.utc),
-                    datetime(2019,1,5,1,tzinfo=timezone.utc),
-                    root / "downloads", (35.25,134.75,35.0,135.25),
-                    notify=notices.append,
-                )
+                m=Era5Materializer("arco_era5",root/"downloads",(35.25,134.75,35.0,135.25),
+                                   root/"unused.exe","hysplit",True,notices.append)
+                try:
+                    output=m.prepare(TimeWindow(datetime(2019,1,5,0,tzinfo=timezone.utc),
+                                                  datetime(2019,1,5,1,tzinfo=timezone.utc)),action="download")[0]
+                finally:m.close()
             self.assertTrue(output.exists())
             mocked.assert_called_once()
             with xr.open_dataset(output, engine="netcdf4") as result:

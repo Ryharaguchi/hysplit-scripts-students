@@ -1,4 +1,4 @@
-﻿"""Full ERA5 horizontal grid, all 37 pressure levels and explicit model top.
+"""Full ERA5 horizontal grid, all 37 pressure levels and explicit model top.
 
 Offline regression: never contact ECMWF or Google services, overwrite cached
 regional files, or mistake legacy 12-pressure-level GRIBs for new data.
@@ -17,7 +17,7 @@ from unittest.mock import patch
 from hysplit_tool.era5 import (
     GLOBAL_ERA5_BBOX, NORTHERN_HEMISPHERE_BBOX, PRESSURE_LEVELS, ARCO_PRESSURE_LEVELS,
     HYSPLIT_PRESSURE_FIELDS, PRESSURE_FIELDS, SURFACE_FIELDS,
-    download_cds, download_google_arco
+    download_cds
 )
 
 UTC=timezone.utc
@@ -25,14 +25,13 @@ UTC=timezone.utc
 class TestGlobalEra5(unittest.TestCase):
     def test_all_official_37_pressure_levels_in_acquisition_and_converter(self):
         from hysplit_tool.arco_convert import PRESSURE_LEVELS as CONVERTED
-        from hysplit_tool.native_era5 import run_native_grib1_pair, convert_cds_grib1_to_arl
+        from hysplit_tool.native_era5 import run_native_grib1_pair
         self.assertEqual(len(PRESSURE_LEVELS),37)
         self.assertEqual(tuple(map(int,PRESSURE_LEVELS)), tuple(CONVERTED))
         self.assertEqual(CONVERTED[0],1000)
         self.assertEqual(CONVERTED[-1],1)
         self.assertEqual(len(ARCO_PRESSURE_LEVELS),37)
         self.assertEqual(run_native_grib1_pair.__kwdefaults__["level_count"],38)
-        self.assertEqual(convert_cds_grib1_to_arl.__kwdefaults__["level_count"],38)
 
     def test_cds_global_request_preserves_37_and_does_not_reuse_12_level_file(self):
         requests=[]
@@ -178,13 +177,14 @@ class TestGlobalEra5(unittest.TestCase):
             return path
         with tempfile.TemporaryDirectory() as td, \
              patch("xarray.open_zarr",return_value=ds), \
-             patch("hysplit_tool.arco_stream.export_hourly_netcdf",side_effect=fake_export):
-            result=download_google_arco(
-                datetime(2019,1,5,0,tzinfo=UTC),
-                datetime(2019,1,5,1,tzinfo=UTC),
-                Path(td),GLOBAL_ERA5_BBOX
-            )
-            self.assertTrue(result.name.endswith("_global37_allvars.nc"))
+             patch("hysplit_tool.era5_materialize.export_hourly_netcdf",side_effect=fake_export):
+            from hysplit_tool.era5_materialize import Era5Materializer
+            from hysplit_tool.time_windows import TimeWindow
+            m=Era5Materializer("arco_era5",Path(td),GLOBAL_ERA5_BBOX,Path(td)/"unused.exe","allvars",True,lambda _:None)
+            try:
+                result=m.prepare(TimeWindow(datetime(2019,1,5,0,tzinfo=UTC),datetime(2019,1,5,1,tzinfo=UTC)),action="download")
+            finally:m.close()
+            self.assertTrue(result[0].name.endswith("_allvars.nc"))
         self.assertEqual(len(observed),1)
 
 

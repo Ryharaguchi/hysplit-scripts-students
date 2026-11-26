@@ -121,7 +121,7 @@ class TestPeriodPipeline(unittest.TestCase):
                         events.append("period2_download_started")
                 return SimpleNamespace(files=tuple(met_files))
 
-            def fake_coverage(files, first, last, _filedates):
+            def fake_coverage(files, first, last, _filedates, **kwargs):
                 return SimpleNamespace(
                     verified=True, messages=(), first=first, last=last, time_count=2,
                 )
@@ -129,6 +129,7 @@ class TestPeriodPipeline(unittest.TestCase):
             with patch("hysplit_tool.gui.execute_group", side_effect=fake_execute), \
                  patch("hysplit_tool.gui.prepare_meteorology", side_effect=fake_prepare), \
                  patch("hysplit_tool.gui.check_coverage", side_effect=fake_coverage), \
+                 patch("hysplit_tool.gui.files_for_window",side_effect=lambda paths,window:list(paths)), \
                  patch("hysplit_tool.gui.create_map", return_value=(
                      root / "map.html", root / "map.geojson", 2, 2,
                  )):

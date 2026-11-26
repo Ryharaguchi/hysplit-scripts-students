@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hysplit_tool.time_windows import (
-    TimeWindow, merge_windows, windows_for_starts, find_window, split_window,
+    TimeWindow, merge_windows, windows_for_starts, find_window,
 )
 from hysplit_tool.meteo import plan_archive_windows
 from hysplit_tool.progress import TaskProgress
@@ -79,14 +79,13 @@ class TestSparseWindows(unittest.TestCase):
                             .startswith("25 12 31 23 45\n"))
             self.assertNotIn("JST",(folder/"CONTROL").read_text(encoding="ascii"))
 
-    def test_arco_split_supports_long_single_trajectory_period(self):
+    def test_arco_planning_does_not_limit_long_trajectory(self):
+        from hysplit_tool.arl_catalog import required_hours,consecutive_hours
         window=TimeWindow(moment(1),moment(31))
-        parts=split_window(window)
-        self.assertGreater(len(parts),2)
-        self.assertEqual(parts[0].start,window.start)
-        self.assertEqual(parts[-1].end,window.end)
-        self.assertTrue(all((p.end-p.start)<=timedelta(days=13) for p in parts))
-        self.assertTrue(all(a.end > b.start for a,b in zip(parts,parts[1:])))
+        hours=required_hours(window)
+        self.assertEqual(len(hours),721)
+        parts=consecutive_hours(hours,by_day=True)
+        self.assertEqual(tuple(t for p in parts for t in required_hours(p)),hours)
 
 
 class TestSparseAcquisition(unittest.TestCase):
@@ -137,88 +136,26 @@ class TestSparseAcquisition(unittest.TestCase):
         self.assertEqual(len(result.files),1)
         self.assertEqual(tracker.done,1)
 
-    def test_cds_multiple_windows_are_separate_for_download_and_conversion(self):
+    def test_both_era5_providers_publish_sparse_windows_before_next(self):
+        from hysplit_tool.era5_materialize import Era5Materializer
         windows=windows_for_starts([moment(3),moment(21)],3)
-        tracker,_=self._progress(4)
-        acquired=[];converted=[]
-        def fake_download(earliest,latest,target_dir,bbox,notify,field_profile="allvars"):
-            acquired.append((earliest,latest))
-            self.assertEqual(field_profile, "hysplit")
-            return [Path(target_dir)/f"era5_pressure_{earliest:%Y%m%d}.grib",
-                    Path(target_dir)/f"era5_single_{earliest:%Y%m%d}.grib"]
-        def fake_convert(files,target_dir,earliest,latest,*,hysplit_executable,
-                        keep_sources=False,notify):
-            converted.append((earliest,latest))
-            return [Path(target_dir)/f"era5_cds_{earliest:%Y%m%d}.arl"]
-        with tempfile.TemporaryDirectory() as td, \
-             patch("hysplit_tool.batch_meteorology.download_cds",
-                   side_effect=fake_download), \
-             patch("hysplit_tool.batch_meteorology.convert_cds_grib1_to_arl",
-                   side_effect=fake_convert):
-            result=prepare_meteorology(
-                "era5_cds",windows,Path(td),(55,100,5,160),
-                action="run",local_met="",hysplit_executable=Path(td)/"mock.exe",
-                notify=lambda _:None,progress=tracker,era5_field_profile="hysplit",
-            )
-        self.assertEqual(acquired,[w.as_pair() for w in windows])
-        self.assertEqual(converted,[w.as_pair() for w in windows])
-        self.assertEqual(tracker.done,4)
-        self.assertEqual(len(result.files),2)
-        self.assertTrue(all(x.start.day in (3,21) for x in windows))
-        self.assertFalse(any(x.start.day==14 for x in windows))
-
-    def test_cds_publishes_a_period_before_fetching_the_next(self):
-        windows=windows_for_starts([moment(3),moment(21)],3)
-        tracker,_=self._progress(4)
-        events=[]
-        def fake_download(earliest,latest,target_dir,bbox,notify,field_profile="allvars"):
-            events.append(("download",earliest))
-            return [Path(target_dir)/f"era5_pressure_{earliest:%Y%m%d}.grib",
-                    Path(target_dir)/f"era5_single_{earliest:%Y%m%d}.grib"]
-        def fake_convert(files,target_dir,earliest,latest,*,hysplit_executable,
-                        keep_sources=False,notify):
-            events.append(("convert",earliest))
-            return [Path(target_dir)/f"era5_cds_{earliest:%Y%m%d}.arl"]
-        def ready(window,files):
-            events.append(("ready",window.start))
-        with tempfile.TemporaryDirectory() as td, \
-             patch("hysplit_tool.batch_meteorology.download_cds",
-                   side_effect=fake_download), \
-             patch("hysplit_tool.batch_meteorology.convert_cds_grib1_to_arl",
-                   side_effect=fake_convert):
-            prepare_meteorology(
-                "era5_cds",windows,Path(td),(55,100,5,160),
-                action="run",local_met="",hysplit_executable=Path(td)/"mock.exe",
-                notify=lambda _:None,progress=tracker,era5_field_profile="hysplit",
-                on_window_ready=ready,
-            )
-        self.assertEqual([stage for stage,_ in events], [
-            "download","convert","ready","download","convert","ready"
-        ])
-
-    def test_arco_multi_window_download_and_transform_stays_separate(self):
-        windows=windows_for_starts([moment(3),moment(21)],3)
-        tracker,_=self._progress(4)
-        acquired=[]
-        def fake_download(start,end,target_dir,bbox,notify,progress=None,field_profile="allvars"):
-            acquired.append((start,end))
-            self.assertEqual(field_profile, "hysplit")
-            return Path(target_dir)/f"era5_{start:%Y%m%d}.nc"
-        with tempfile.TemporaryDirectory() as td, \
-             patch("hysplit_tool.batch_meteorology.download_google_arco",
-                   side_effect=fake_download), \
-             patch("hysplit_tool.batch_meteorology.convert_arco_netcdf_to_arl",
-                   side_effect=lambda nc,target_dir,start,end,**kw:[
-                       Path(target_dir)/(nc.stem+".arl")
-                   ]):
-            result=prepare_meteorology(
-                "arco_era5",windows,Path(td),(55,100,5,160),
-                action="run",local_met="",hysplit_executable=Path(td)/"mock.exe",
-                notify=lambda _:None,progress=tracker,era5_field_profile="hysplit",
-            )
-        self.assertEqual(acquired,[w.as_pair() for w in windows])
-        self.assertEqual(tracker.done,4)
-        self.assertEqual(len(result.files),2)
+        for provider in ("era5_cds","arco_era5"):
+            tracker,_=self._progress(4)
+            events=[]
+            def prepare(m,window,*,action,progress):
+                self.assertEqual(m.profile,"hysplit")
+                self.assertEqual(action,"run")
+                events.append(("prepare",window))
+                return (m.root/f"{window.start:%Y%m%d}.arl",)
+            with tempfile.TemporaryDirectory() as td, patch.object(Era5Materializer,"prepare",prepare):
+                result=prepare_meteorology(provider,windows,Path(td),(55,100,5,160),
+                    action="run",local_met="",hysplit_executable=Path(td)/"mock.exe",
+                    notify=lambda _:None,progress=tracker,era5_field_profile="hysplit",
+                    on_window_ready=lambda w,_:events.append(("ready",w)))
+            self.assertEqual(events,[("prepare",windows[0]),("ready",windows[0]),
+                                     ("prepare",windows[1]),("ready",windows[1])])
+            self.assertEqual(len(result.files),2)
+            self.assertEqual(tracker.done,4)
 
     def test_cds_request_days_do_not_include_empty_gap(self):
         from hysplit_tool.era5 import download_cds

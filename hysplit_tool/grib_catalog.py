@@ -51,9 +51,10 @@ def _scan(path_text,size,mtime):
     import eccodes as e
     path=Path(path_text)
     records=[]
+    levels=frozenset(map(int,PRESSURE_LEVELS))
     with path.open("rb") as f:
         while True:
-            h=e.codes_grib_new_from_file(f)
+            h=e.codes_grib_new_from_file(f,headers_only=True)
             if h is None:break
             try:
                 if e.codes_get(h,"edition")!=1:
@@ -70,7 +71,7 @@ def _scan(path_text,size,mtime):
                     key=(0,p)
                 # Keep only HYSPLIT fields in this index. The source archive
                 # retains every other variable unchanged.
-                if key[0] in map(int,PRESSURE_LEVELS) or key in REQUIRED_KEYS:
+                if key[0] in levels or key in REQUIRED_KEYS:
                     records.append(Message(path,int(e.codes_get_message_offset(h)),
                         int(e.codes_get_message_size(h)),_grid(e,h),t,key))
             finally:

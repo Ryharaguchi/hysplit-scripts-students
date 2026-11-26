@@ -119,4 +119,20 @@ class TestCatalog(unittest.TestCase):
             self.assertEqual(events,[("prepare",w[0]),("ready",w[0]),("prepare",w[1]),("ready",w[1])])
             self.assertEqual(progress.done,4)
 
+    def test_cache_writer_releases_when_process_exits(self):
+        import os,sys,subprocess
+        from hysplit_tool.era5_materialize import cache_writer
+        with tempfile.TemporaryDirectory() as tmp:
+            d=Path(tmp)
+            code=("import sys; from hysplit_tool.era5_materialize import cache_writer; "
+                  "from pathlib import Path; "
+                  "exec('with cache_writer(Path(sys.argv[1])):\\n print(\\\"acquired\\\")')")
+            with cache_writer(d):
+                denied=subprocess.run([sys.executable,"-c",code,str(d)],capture_output=True,text=True)
+                self.assertNotEqual(denied.returncode,0)
+                self.assertIn("Another process",denied.stderr)
+            allowed=subprocess.run([sys.executable,"-c",code,str(d)],capture_output=True,text=True)
+            self.assertEqual(allowed.returncode,0,allowed.stderr)
+            self.assertIn("acquired",allowed.stdout)
+
 if __name__=="__main__":unittest.main()

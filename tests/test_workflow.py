@@ -129,6 +129,7 @@ class TestValidation(unittest.TestCase):
                            stdout="26 10 10 00 00\n26 10 10 03 00\n26 10 10 06 00", stderr="")):
                 report = check_coverage([met], start, end, tool, max_gap_hours=3)
             self.assertTrue(report.verified)
+            met.write_bytes(b"ARLTEST changed")
             with patch("hysplit_tool.validation.subprocess.run",
                        return_value=CompletedProcess([], 0,
                            stdout="26 10 10 00 00\n26 10 10 06 00", stderr="")):

@@ -7,24 +7,19 @@ model-hour coverage before any ARL file is published.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import time
-from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from .era5 import PRESSURE_LEVELS
 from .platform_guard import require_native_windows
-from .validation import check_coverage, check_signature, parse_filedates
+from .validation import check_signature
 
-_PAIR = re.compile(r"^era5_(pressure|single)_(\d{6})_(.+)\.grib$", re.IGNORECASE)
 
 
 def _grib2arl_is_running() -> bool:
@@ -75,64 +70,6 @@ def cleanup_abandoned_converter_workspaces(
     if removed and notify:
         notify(
             f"Abandoned ERA5 converter scratch removed: {removed} folders, "
-            f"{freed / (1024 ** 3):.2f} GiB freed"
-        )
-    return removed, freed
-
-
-def cleanup_verified_cds_gribs(
-    arl_dir: Path, source_dir: Path, filedates: Path, *,
-    notify: Callable[[str], None] | None = None,
-) -> tuple[int, int]:
-    """Finish GRIB cleanup after a prior run stopped after ARL publication."""
-    arl_dir, source_dir, filedates = Path(arl_dir), Path(source_dir), Path(filedates)
-    if _grib2arl_is_running():
-        if notify:
-            notify("CDS GRIB cleanup skipped because grib2arl is still running")
-        return 0, 0
-    root = source_dir.resolve()
-    removed = 0
-    freed = 0
-    for metadata_path in arl_dir.glob("era5_cds_*.json"):
-        output = metadata_path.with_suffix(".arl")
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            paths = [Path(value).resolve() for value in metadata["source_grib_files"]]
-            if (not output.is_file() or output.stat().st_size == 0
-                    or not paths):
-                continue
-            if any(path.parent != root or path.suffix.lower() != ".grib"
-                   or not path.name.lower().startswith(("era5_pressure_", "era5_single_"))
-                   for path in paths):
-                continue
-            if not any(path.is_file() for path in paths):
-                continue
-            scan = subprocess.run(
-                [str(filedates.resolve()), output.name], cwd=output.parent,
-                capture_output=True, text=True, errors="replace",
-            )
-            if scan.returncode:
-                continue
-            times = parse_filedates(scan.stdout)
-            if not times:
-                continue
-            report = check_coverage(
-                [output], times[0], times[-1], filedates, max_gap_hours=1.01,
-            )
-            if not report.verified:
-                continue
-            for path in paths:
-                if path.is_file():
-                    size = path.stat().st_size
-                    path.unlink()
-                    removed += 1
-                    freed += size
-        except (OSError, ValueError, TypeError, KeyError, RuntimeError,
-                subprocess.SubprocessError):
-            continue
-    if removed and notify:
-        notify(
-            f"Verified CDS conversion intermediates removed: {removed} GRIB files, "
             f"{freed / (1024 ** 3):.2f} GiB freed"
         )
     return removed, freed
@@ -226,28 +163,6 @@ def _check_conversion_space(pressure: Path, surface: Path, destination: Path,
         )
 
 
-def match_cds_pairs(sources: list[Path]) -> dict[str, tuple[Path, Path]]:
-    """Pair upper/surface files of the same month, bounding box and day range."""
-    pairs: dict[str, dict[str, Path]] = defaultdict(dict)
-    for path in map(Path, sources):
-        matched = _PAIR.match(path.name)
-        if not matched:
-            raise ValueError(f"Unexpected CDS GRIB filename: {path.name}")
-        variant, month, label = matched.groups()
-        identifier = month + "_" + label
-        if variant.lower() in pairs[identifier]:
-            raise ValueError(f"Duplicate CDS {variant} dataset: {path.name}")
-        pairs[identifier][variant.lower()] = path
-    if not pairs:
-        raise ValueError("No CDS meteorological data downloaded")
-    missing = {k: sorted({"pressure", "single"} - set(v))
-               for k, v in pairs.items() if set(v) != {"pressure", "single"}}
-    if missing:
-        raise ValueError(f"ERA5 CDS upper/surface pairs incomplete: {missing}")
-    return {key: (values["pressure"], values["single"])
-            for key, values in sorted(pairs.items())}
-
-
 def require_grib1(path: Path) -> None:
     path = Path(path)
     if not path.is_file() or path.stat().st_size < 16:
@@ -314,8 +229,8 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
     converter, destination = Path(converter).resolve(), Path(destination)
     if not converter.is_file() or converter.suffix.lower() != ".exe":
         raise FileNotFoundError(f"Native Windows grib2arl.exe not found: {converter}")
-    if not 2 <= level_count <= 60:
-        raise ValueError("ARL vertical level count outside 2..60")
+    if level_count < 2:
+        raise ValueError("ARL requires surface and at least one upper level")
     require_grib1(pressure)
     require_grib1(surface)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -444,126 +359,3 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
             continue
 
     raise RuntimeError(f"grib2arl conversion failed without usable DATA.ARL; log: {log_path}")
-
-
-def convert_cds_grib1_to_arl(sources: list[Path], target_dir: Path,
-                             earliest: datetime, latest: datetime, *,
-                             hysplit_executable: Path,
-                             level_count: int = len(PRESSURE_LEVELS) + 1,
-                             keep_sources: bool = False,
-                             notify: Callable[[str], None] | None = None) -> list[Path]:
-    """Pair CDS files, convert them on Windows and verify coverage before rename.
-
-    The exact ERA5 GRIB variable set, grid and level configuration must be
-    validated for a research dataset. CDS may return GRIB2 or different
-    messages; unsupported formats are rejected, not silently interpreted.
-    """
-    require_native_windows()
-    exec_dir = Path(hysplit_executable).resolve().parent
-    converter = exec_dir / "grib2arl.exe"
-    filedates = exec_dir / "filedates.exe"
-    if not converter.is_file():
-        raise FileNotFoundError(f"grib2arl.exe is required in HYSPLIT exec directory: {exec_dir}")
-    if not filedates.is_file():
-        raise FileNotFoundError(f"filedates.exe is required in HYSPLIT exec directory: {exec_dir}")
-    pairs = match_cds_pairs(sources)
-    target_dir = Path(target_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    finalized: list[Path] = []
-    staged: list[tuple[Path, Path]] = []
-    preserved_stages: set[Path] = set()
-    sources_by_output: dict[Path, tuple[Path, Path]] = {}
-    for key, (pressure, surface) in pairs.items():
-        # Caching key includes file identities and selected level scheme.
-        identity = f"{pressure.resolve()}:{pressure.stat().st_size}:{pressure.stat().st_mtime_ns}|" + \
-                   f"{surface.resolve()}:{surface.stat().st_size}:{surface.stat().st_mtime_ns}|{level_count}"
-        token = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
-        destination = target_dir / f"era5_cds_{key}_{token}.arl"
-        sources_by_output[destination] = (pressure, surface)
-        if destination.is_file() and destination.stat().st_size > 0:
-            finalized.append(destination)
-            if notify:
-                notify(f"ERA5 converted cache: {destination.name}")
-            continue
-        intermediate = destination.with_suffix(destination.suffix + ".part")
-        if intermediate.exists():
-            check_signature(intermediate)
-            preserved_stages.add(intermediate)
-            if notify:
-                notify(
-                    f"Reusing staged ERA5 ARL for filedates verification: "
-                    f"{intermediate.name}"
-                )
-        else:
-            intermediate = run_native_grib1_pair(
-                pressure, surface, destination, converter,
-                level_count=level_count, notify=notify,
-            )
-        staged.append((destination, intermediate))
-    to_verify = finalized + [temp for _, temp in staged]
-    try:
-        report = check_coverage(to_verify, earliest, latest, filedates, max_gap_hours=1.01)
-        if not report.verified:
-            raise RuntimeError("ERA5 ARL time verification failed")
-        for dest, tmp in staged:
-            tmp.replace(dest)
-        cache_id = hashlib.sha256((
-            f"{earliest.isoformat()}|{latest.isoformat()}|{level_count}|"
-            + "|".join(sorted(
-                source.name for pair in sources_by_output.values() for source in pair
-            ))
-        ).encode("utf-8")).hexdigest()[:20]
-        field_profile = (
-            "hysplit" if all(
-                source.name.lower().endswith("_hysplit.grib")
-                for pair in sources_by_output.values() for source in pair
-            ) else "allvars"
-        )
-        # Save provenance first; if cleanup is interrupted, the next app run
-        # can validate this ARL again before removing the same source GRIBs.
-        for dest, (pressure, surface) in sources_by_output.items():
-            metadata = {
-                "cache_id": cache_id,
-                "requested_start": earliest.isoformat(),
-                "requested_end": latest.isoformat(),
-                "pair_count": len(pairs),
-                "pressure_levels_hpa": list(PRESSURE_LEVELS),
-                "field_profile": field_profile,
-                "source_grib_files": [str(pressure.resolve()), str(surface.resolve())],
-                "first": report.first.isoformat() if report.first else earliest.isoformat(),
-                "last": report.last.isoformat() if report.last else latest.isoformat(),
-                "time_count": report.time_count,
-                "validation": "NOAA Windows filedates (timestamps only; not physical validation)",
-            }
-            dest.with_suffix(".json").write_text(
-                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-    except Exception:
-        for _dest, tmp in staged:
-            if tmp not in preserved_stages:
-                tmp.unlink(missing_ok=True)
-        raise
-    if keep_sources:
-        if notify:
-            notify("Verified CDS source GRIB files retained by setting")
-    else:
-        removed_bytes = 0
-        removed_count = 0
-        for source in dict.fromkeys(Path(path) for path in sources):
-            try:
-                if source.is_file():
-                    removed_bytes += source.stat().st_size
-                    source.unlink()
-                    removed_count += 1
-            except OSError as exc:
-                if notify:
-                    notify(
-                        f"Converted ERA5 GRIB retained (cleanup failed): "
-                        f"{source.name}: {exc}"
-                    )
-        if removed_count and notify:
-            notify(
-                f"Verified CDS conversion intermediates removed: {removed_count} GRIB files, "
-                f"{removed_bytes / (1024 ** 3):.2f} GiB freed"
-            )
-    return finalized + [dest for dest, _tmp in staged]

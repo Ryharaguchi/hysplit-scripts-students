@@ -18,18 +18,17 @@ UTC = timezone.utc
 
 
 class TestCore(unittest.TestCase):
-    def test_automatic_worker_count_is_bounded_by_cpus_tasks_and_cap(self):
+    def test_automatic_worker_count_is_bounded_by_cpus_and_tasks(self):
         self.assertEqual(automatic_worker_count(20,cpu_count=4),3)
         self.assertEqual(automatic_worker_count(1,cpu_count=16),1)
-        self.assertEqual(automatic_worker_count(20,cpu_count=32),8)
+        self.assertEqual(automatic_worker_count(20,cpu_count=32),20)
         self.assertEqual(automatic_worker_count(20,cpu_count=1),1)
 
     def test_parse_heights_inclusive(self):
         values = parse_heights("500:10000:100")
         self.assertEqual((len(values), values[0], values[-1]), (96, 500, 10000))
         self.assertEqual(parse_heights("500,600,900"), [500, 600, 900])
-        with self.assertRaises(ValueError):
-            parse_heights("0:10:1")
+        self.assertEqual(parse_heights("0:10:1"),list(range(11)))
         with self.assertRaises(ValueError):
             parse_heights("500:1000:-100")
 

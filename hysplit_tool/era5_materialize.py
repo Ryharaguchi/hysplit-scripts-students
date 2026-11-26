@@ -3,17 +3,17 @@ Existing complete inputs are read-only. New source retrieval and conversion
 are separated, and ARL work is published by verified time range.
 """
 from __future__ import annotations
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
 import hashlib
 import json
-import math
+import os
 import tempfile
 
 from .arl_catalog import (select_arl, inspect_arl, compatible_grid,
                           consecutive_hours, required_hours, HOUR, native_files)
-from .grib_catalog import index_grib,write_pair,scan_grib,UPPER_KEYS,SURFACE_KEYS
+from .grib_catalog import index_grib,write_pair,UPPER_KEYS,SURFACE_KEYS
 from .era5 import (ARCO_URL, ARCO_PRESSURE_FIELDS, ARCO_SURFACE_FIELDS,
                    ARCO_HUMIDITY_ALTERNATIVES, ARCO_PRESSURE_LEVELS,
                    _subset_arco_domain,download_cds)
@@ -27,9 +27,40 @@ UTC=timezone.utc
 CDS_ALL_FIELDS=frozenset((int(l),p) for l in ARCO_PRESSURE_LEVELS
                         for p in (60,75,76,129,130,131,132,133,135,138,155,157,203,246,247,248))
 
+@contextmanager
+def cache_writer(root):
+    """OS-owned lock released automatically on process exit; no stale PID lock."""
+    root=Path(root)
+    root.mkdir(parents=True,exist_ok=True)
+    with (root/".meteorology.lock").open("a+b") as f:
+        if f.tell()==0:
+            f.write(b"\0");f.flush()
+        f.seek(0)
+        try:
+            if os.name=="nt":
+                import msvcrt
+                msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1)
+            else:
+                import fcntl
+                fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except OSError as exc:
+            raise RuntimeError(f"Another process is preparing meteorology in {root}. "
+                               "Existing data is safe; retry after it finishes.") from exc
+        try:
+            yield
+        finally:
+            f.seek(0)
+            if os.name=="nt":
+                msvcrt.locking(f.fileno(),msvcrt.LK_UNLCK,1)
+            else:
+                fcntl.flock(f,fcntl.LOCK_UN)
+
+
 class Era5Materializer:
     def __init__(self,provider,root,bbox,executable,field_profile,keep_sources,notify,
                  conversion_slot=None):
+        if provider not in ("arco_era5","era5_cds") or field_profile not in ("hysplit","allvars"):
+            raise ValueError("Unknown ERA5 provider or field profile")
         self.provider=provider
         self.root=Path(root)
         self.bbox=tuple(bbox)
@@ -57,6 +88,26 @@ class Era5Materializer:
             self.remote=xr.open_zarr(ARCO_URL,storage_options={"token":"anon"},chunks=None)
         return self.remote
 
+    def _archive_fields(self):
+        schema_path=self.root/"arco_schema.json"
+        if schema_path.is_file():
+            try:
+                schema=json.loads(schema_path.read_text(encoding="utf-8"))
+                fields=set(schema["variables"])
+                if (schema["source"]==ARCO_URL and
+                    set(ARCO_PRESSURE_FIELDS+ARCO_SURFACE_FIELDS).issubset(fields)
+                    and fields.intersection(ARCO_HUMIDITY_ALTERNATIVES)):
+                    return fields
+            except (OSError,ValueError,KeyError,TypeError):
+                pass
+        fields=set(self._remote().data_vars)
+        self.root.mkdir(parents=True,exist_ok=True)
+        tmp=schema_path.with_suffix(".json.part")
+        tmp.write_text(json.dumps({"source":ARCO_URL,"variables":sorted(fields)},
+                                  indent=2),encoding="utf-8")
+        tmp.replace(schema_path)
+        return fields
+
     def _nc_inventory(self,needed,archive=False):
         import numpy as np
         import xarray as xr
@@ -65,7 +116,7 @@ class Era5Materializer:
         files=sorted(set(self.root.glob("*.nc"))|set(self.source.glob("*.nc"))|
                      set(self.root.glob("*.part"))|set(self.source.glob("*.part")))
         coverage={}
-        all_fields=set(self._remote().data_vars) if archive else None
+        all_fields=self._archive_fields() if archive else None
         for path in files:
             try:
                 with xr.open_dataset(path,engine="netcdf4") as ds:
@@ -125,7 +176,11 @@ class Era5Materializer:
         if not archive:
             humidity=next((x for x in ARCO_HUMIDITY_ALTERNATIVES if x in selected.data_vars),None)
             if humidity is None:raise ValueError("ARCO humidity is missing")
+            if humidity=="specific_humidity":
+                self.notify("ARCO specific_humidity: relative_humidity will be derived during GRIB conversion")
             selected=selected[ARCO_PRESSURE_FIELDS+ARCO_SURFACE_FIELDS+[humidity]]
+        elif not self._archive_fields().issubset(set(selected.data_vars)):
+            raise ValueError("ARCO source schema changed; check source product before continuing")
         self.source.mkdir(parents=True,exist_ok=True)
         token=hashlib.sha256(repr((self.bbox,self.profile,tuple(wanted))).encode()).hexdigest()[:12]
         path=self.source/f"arco_era5_{window.start:%Y%m%dT%H%M}_{window.end:%Y%m%dT%H%M}_{token}_{self.profile}.nc"
@@ -134,6 +189,30 @@ class Era5Materializer:
         result=export_hourly_netcdf(selected,path,source=ARCO_URL,notify=self.notify,progress=progress)
         self.created_sources.add(result.resolve())
         return result
+
+    def _finalize_download_parts(self,nc,wanted,progress):
+        import xarray as xr
+        import numpy as np
+        partials={}
+        for t in wanted:
+            path=nc[t]
+            if path.suffix==".part":
+                partials.setdefault(path,[]).append(t)
+        for path,hours in partials.items():
+            with xr.open_dataset(path,engine="netcdf4") as ds:
+                for interval in consecutive_hours(hours,by_day=True):
+                    times=required_hours(interval)
+                    selected=ds.sel(time=[np.datetime64(t.replace(tzinfo=None),"s") for t in times])
+                    selected=_subset_arco_domain(selected,self.bbox)
+                    token=hashlib.sha256(repr((str(path.resolve()),tuple(times),self.bbox)).encode()).hexdigest()[:16]
+                    self.source.mkdir(parents=True,exist_ok=True)
+                    output=self.source/f"local_{interval.start:%Y%m%dT%H%M}_{token}.nc"
+                    if output.exists():
+                        raise RuntimeError(f"Existing output was not validated; preserved: {output}")
+                    output=export_hourly_netcdf(selected,output,source=f"local:{path.resolve()}",
+                                               notify=self.notify,progress=progress)
+                    nc.update({t:output for t in times})
+        return tuple(dict.fromkeys(nc[t] for t in wanted))
 
     def _grib_paths(self):
         return tuple(sorted(set(self.root.glob("*.grib"))|set(self.arl.glob("*.grib"))|
@@ -231,8 +310,18 @@ class Era5Materializer:
                          validation_failed)
             # Only discard an invalid derived scratch file from this exact
             # attempt, never an existing ARL or input GRIB/NetCDF.
-            if validation_failed and generated_stage and staged.exists():
-                staged.unlink()
+            if validation_failed and staged.exists():
+                if generated_stage:
+                    staged.unlink()
+                else:
+                    # The previous run may have stopped after conversion.
+                    # Keep its invalid output as evidence, not a permanent
+                    # blocker for recovery from intact raw data.
+                    import uuid
+                    quarantine=self.stage/f"{staged.name}.{uuid.uuid4().hex}.invalid"
+                    staged.replace(quarantine)
+                    self.notify(f"Unusable staged ARL retained: {quarantine}")
+                    return self._day_outputs(records,window)
             if not recoverable or len(wanted)==1 or staged.exists():
                 raise
             self.notify(f"Conversion of {len(wanted)} hourly records failed: {exc}. "
@@ -252,7 +341,12 @@ class Era5Materializer:
         # Do not overwrite an existing source. If an interrupted generated
         # pair has only one component, keep it for inspection.
         if p.exists() or s.exists():
-            raise RuntimeError(f"Incomplete generated GRIB pair preserved: {p}, {s}")
+            import uuid
+            # Generated scratch is not a scientific archive; preserve an
+            # interrupted pair under a unique name and rebuild missing input.
+            for old in (p,s):
+                if old.exists():
+                    old.replace(old.with_name(old.name+"."+uuid.uuid4().hex+".incomplete"))
         q={}
         netcdf_to_grib1(path,p,s,notify=self.notify,quality_report=q,
                          wanted_times=tuple(hours),bbox=self.bbox)
@@ -286,6 +380,10 @@ class Era5Materializer:
             self.created_sources.discard(resolved)
 
     def prepare(self,window,*,action,progress=None):
+        with cache_writer(self.root):
+            return self._prepare(window,action=action,progress=progress)
+
+    def _prepare(self,window,*,action,progress=None):
         wanted=required_hours(window)
         archive=self.profile=="allvars"
         if action=="run":
@@ -297,21 +395,22 @@ class Era5Materializer:
             existing=();missing=wanted
         self.notify(f"{self.provider}: {len(wanted)} required UTC hours, {len(wanted)-len(missing)} ARL-covered hours")
 
+        needed=set(missing)
+        records=index_grib(self._grib_paths(),self.bbox,needed,self.notify) if needed and action=="run" else {}
         # Full-variable source retrieval remains distinct from the ARL-only
         # request: ARL never counts as a full scientific archive.
         if self.provider=="arco_era5":
-            nc=self._nc_inventory(wanted if archive or action=="download" else missing,archive=archive)
+            nc_hours=set(wanted) if archive or action=="download" else needed-set(records)
+            nc=self._nc_inventory(nc_hours,archive=archive) if nc_hours else {}
             source_needed=set(wanted if archive or action=="download" else ())
             for part in consecutive_hours(source_needed-set(nc),by_day=True):
                 path=self._fetch_arco(part,progress,archive=archive)
                 nc.update({t:path for t in required_hours(part)})
             if action=="download":
-                return tuple(dict.fromkeys(nc[t] for t in wanted))
+                return self._finalize_download_parts(nc,wanted,progress)
         else:
             nc={}
 
-        needed=set(missing)
-        records=index_grib(self._grib_paths(),self.bbox,needed,self.notify) if needed else {}
         # CDS source-only and archival requests use actual GRIB field
         # coverage, not a matching filename.
         if self.provider=="era5_cds" and (archive or action=="download"):
@@ -359,7 +458,11 @@ class Era5Materializer:
             # publication; never remove data that existed before this run.
             used={m.path for t in times for m in records[t].values()}
             used.update(nc[t] for t in times if t in nc)
-            self._cleanup_created(used)
+            remaining=set(needed)-set(times)
+            needed.difference_update(times)
+            active={m.path for t in remaining if t in records for m in records[t].values()}
+            active.update(nc[t] for t in remaining if t in nc)
+            self._cleanup_created(used-active)
         selected,still_missing=select_arl(self.arl,window,self.bbox,self.notify)
         if still_missing:
             raise RuntimeError(f"ARL is incomplete after materialization: {still_missing}")
