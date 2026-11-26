@@ -10,3 +10,7 @@ Development branch; NOT a distributable release. Existing distribution unchanged
 - Remaining release gates: 124-hour north-hemisphere GRIB conversion with nonconstant fields; converter diagnosis/fix and restart; genuine ARCO/CDS acquisition checks; EXE build and self-test. No app distribution update performed.
 
 Code changes: delete inactive legacy acquisition and conversion wrappers and migration-specific branch, reuse content-indexed partial hours, archive-schema metadata cache for offline full-profile reuse, OS-managed write lock, recover invalid staged ARL without overwriting existing source archives, GRIB header-only scanning, generated-only cleanup. Unit tests exercise the active workflow instead of removed private helpers. Scientific fields, level selection, input data packing, and user calculation parameters unchanged.
+
+## Subsequent release decision
+
+See [v0.1.1 release scope and limitations](release-0.1.1.md). Actual 48-hour northern-hemisphere GRIB splitting passed with identical outputs after the Windows large-file offset fix. User approved a release under the file-size hypothesis; 124-hour student-specific reproduction remains unverified.

@@ -1,0 +1,68 @@
+{
+  "source": "Existing CDS-derived GRIB1 diagnostic pair; actual ERA5 data, not ARCO student source",
+  "converter_sha256": "dfed1c615a1c4955d71802f063a186bb74f344b0a08c8c5ccfd7d9156e548a4e",
+  "source_sizes": [
+    11079980928,
+    374321088
+  ],
+  "cases": {
+    "whole_48h": {
+      "status": "PASS",
+      "hours": 48,
+      "bytes": 5714630880,
+      "seconds": 383.52
+    },
+    "split_1_24h": {
+      "status": "PASS",
+      "hours": 24,
+      "bytes": 2857315440,
+      "seconds": 189.42
+    },
+    "split_2_24h": {
+      "status": "PASS",
+      "hours": 24,
+      "bytes": 2857315440,
+      "seconds": 178.88
+    }
+  },
+  "hours": 48,
+  "first": "2026-04-29T00:00:00+00:00",
+  "last": "2026-04-30T23:00:00+00:00",
+  "grid": [
+    1440,
+    361
+  ],
+  "pressure_levels": 37,
+  "pressure_messages": 10656,
+  "surface_messages": 336,
+  "original_order_matches_writer": true,
+  "source_sha256": [
+    "6cd4226a1962f266562a01718016139faf9b346271b0a932fe9aacfa08a84aeb",
+    "034ba064dbb798f4b095f45f3db5c7542c23f517531602bf7ee52246da5dc1a8"
+  ],
+  "split_1_input": {
+    "pressure_bytes": 5539990464,
+    "surface_bytes": 187160544,
+    "byte_identical": true,
+    "hours": 24
+  },
+  "split_2_input": {
+    "pressure_bytes": 5539990464,
+    "surface_bytes": 187160544,
+    "byte_identical": true,
+    "hours": 24
+  },
+  "concatenated_split_sha256": [
+    "6cd4226a1962f266562a01718016139faf9b346271b0a932fe9aacfa08a84aeb",
+    "034ba064dbb798f4b095f45f3db5c7542c23f517531602bf7ee52246da5dc1a8"
+  ],
+  "source_sha256_after": [
+    "6cd4226a1962f266562a01718016139faf9b346271b0a932fe9aacfa08a84aeb",
+    "034ba064dbb798f4b095f45f3db5c7542c23f517531602bf7ee52246da5dc1a8"
+  ],
+  "source_unchanged": true,
+  "arl_comparison": {
+    "identical_hourly_blocks": 48,
+    "different_hourly_blocks": []
+  }
+}
