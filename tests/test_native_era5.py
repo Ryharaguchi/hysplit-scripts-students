@@ -102,6 +102,39 @@ class TestNativeEra5(unittest.TestCase):
             self.assertFalse(output.with_suffix(".arl.part").exists())
             self.assertTrue(pressure.exists() and surface.exists())
 
+    def test_failure_log_preserves_full_messages_and_previous_attempts(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            converter=root/"grib2arl.exe";converter.write_bytes(b"stub")
+            pressure=root/"p.grib";surface=root/"s.grib"
+            fake_grib(pressure);fake_grib(surface)
+            output=root/"output.arl"
+            log=output.with_suffix(".arl.log")
+            log.write_text("OLD EXECUTION\n",encoding="utf-8")
+            message="\n".join(f"WARNING detail {i}" for i in range(80))+"\nLAST DETAIL"
+            def popen(command,cwd,**kwargs):
+                work=Path(cwd)
+                (work/"MESSAGE").write_text(message,encoding="utf-8")
+                (work/"WARNING").write_text("full warning file",encoding="utf-8")
+                (work/"CFG_ARL").write_text("pressure configuration",encoding="utf-8")
+                proc=Mock();proc.poll.return_value=1131;proc.returncode=1131
+                return proc
+            with patch("hysplit_tool.native_era5.require_native_windows"), \
+                 patch("hysplit_tool.native_era5.subprocess.Popen",side_effect=popen), \
+                 patch("hysplit_tool.native_era5._grib_inventory",return_value="inventory complete"):
+                for _ in range(2):
+                    with self.assertRaisesRegex(RuntimeError,"1131"):
+                        run_native_grib1_pair(pressure,surface,output,converter)
+            text=log.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("OLD EXECUTION"))
+            self.assertEqual(text.count("Exit code=1131"),2)
+            self.assertEqual(text.count(message),2)
+            for evidence in ("full warning file","pressure configuration","inventory complete","SHA256=","Command:"):
+                self.assertEqual(text.count(evidence),2)
+            self.assertEqual(set(x.name for x in root.iterdir()),
+                             {"p.grib","s.grib","grib2arl.exe","output.arl.log"})
+
     def test_abandoned_converter_workspaces_are_only_removed_when_idle(self):
         with tempfile.TemporaryDirectory() as td:
             arl = Path(td) / "arl"

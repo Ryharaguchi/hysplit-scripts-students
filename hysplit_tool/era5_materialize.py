@@ -267,6 +267,12 @@ class Era5Materializer:
                 # All input messages and the expected output grid are known.
                 arl_bytes=len(wanted)*(1+37*6+6)*(int(grid[0])*int(grid[1])+50)
                 direct=self._exact_pair(records,wanted)
+                with dest.with_suffix(".arl.log").open("a",encoding="utf-8") as f:
+                    f.write(f"\nRequested UTC: {wanted[0].isoformat()} .. {wanted[-1].isoformat()}; "
+                            f"{len(wanted)} hourly records; grid={grid}; "
+                            f"method={'existing pair' if direct else 'byte-copy slice'}\n")
+                    for path in sorted(set(m.path for t in wanted for m in records[t].values())):
+                        f.write(f"Source GRIB: {path}; bytes={path.stat().st_size}\n")
                 if direct is not None:
                     with self.slot():
                         staged=run_native_grib1_pair(*direct,dest,converter,

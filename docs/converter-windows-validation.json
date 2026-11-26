@@ -1,0 +1,49 @@
+{
+  "exe_sha256": "a8d7adfb838aa580e918e8efba6b14ff05c5081a4f1e0e20c2d3088efd5f1523",
+  "cases": [
+    {
+      "input": "split2",
+      "returncode": 0,
+      "seconds": 10.36,
+      "status": "PASS",
+      "bytes": 238109620,
+      "identical_to_old_arl": true,
+      "ref_sha256": "88baececf968bf11c1ab44465a3d83f5602e84c6e36c784e4e71cc15b4c19eb9",
+      "new_sha256": "88baececf968bf11c1ab44465a3d83f5602e84c6e36c784e4e71cc15b4c19eb9",
+      "times": [
+        "2026-04-30T22:00:00+00:00",
+        "2026-04-30T23:00:00+00:00"
+      ]
+    },
+    {
+      "input": "split1",
+      "returncode": 0,
+      "seconds": 14.844,
+      "status": "PASS",
+      "bytes": 238109620,
+      "identical_to_old_arl": true,
+      "ref_sha256": "f03796e9ad51f07f591d9cda4f79f9ca7d1794783d1585b62dbff204fba7157e",
+      "new_sha256": "f03796e9ad51f07f591d9cda4f79f9ca7d1794783d1585b62dbff204fba7157e",
+      "times": [
+        "2026-04-30T20:00:00+00:00",
+        "2026-04-30T21:00:00+00:00"
+      ]
+    },
+    {
+      "input": "whole",
+      "returncode": 0,
+      "seconds": 26.89,
+      "status": "PASS",
+      "bytes": 476219240,
+      "identical_to_old_arl": true,
+      "ref_sha256": "cd933610a955a84956438df9015be7362ad61d55cfe139dfc68cda8e0d920654",
+      "new_sha256": "cd933610a955a84956438df9015be7362ad61d55cfe139dfc68cda8e0d920654",
+      "times": [
+        "2026-04-30T20:00:00+00:00",
+        "2026-04-30T21:00:00+00:00",
+        "2026-04-30T22:00:00+00:00",
+        "2026-04-30T23:00:00+00:00"
+      ]
+    }
+  ]
+}

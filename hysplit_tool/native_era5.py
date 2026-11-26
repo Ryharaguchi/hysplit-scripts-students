@@ -7,15 +7,19 @@ model-hour coverage before any ARL file is published.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import time
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from . import __version__
 from .era5 import PRESSURE_LEVELS
 from .platform_guard import require_native_windows
 from .validation import check_signature
@@ -199,19 +203,71 @@ def _converter_messages(work: Path, *, include_config: bool) -> tuple[str, tuple
                 warnings.append(lines[index + 1].strip())
 
     details = []
-    if warnings:
-        details.append("grib2arl MESSAGE warnings/errors:")
-        details.extend(f"  {line}" for line in warnings[:40])
-    if include_config:
-        config_path = work / "CFG_ARL"
-        if config_path.is_file():
+    # Keep the converter's text files verbatim (no warning-line limit).
+    for name in ("MESSAGE", "WARNING", "CFG_ARL"):
+        if name == "CFG_ARL" and not include_config:
+            continue
+        path = work / name
+        if name == "MESSAGE":
+            contents = message_text
+        elif path.is_file():
             try:
-                details.extend(("CFG_ARL at failure:", config_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).rstrip()))
+                contents = path.read_text(encoding="utf-8", errors="replace")
             except OSError as exc:
-                details.append(f"Could not read CFG_ARL: {exc}")
+                contents = f"Could not read {name}: {exc}"
+        else:
+            contents = ""
+        details.extend((f"--- {name} ---", contents or "(not created or empty)"))
     return "\n".join(details), tuple(warnings)
+
+
+def _grib_inventory(pressure, surface):
+    """Failure-only header scan. No raw data copies or new diagnostic files."""
+    from .grib_catalog import scan_grib, UPPER_KEYS, SURFACE_KEYS
+    from datetime import timedelta
+    lines = ["--- Actual GRIB1 input inventory (valid UTC; level hPa, paramId) ---"]
+    by_file = []
+    for path, keys in ((pressure, UPPER_KEYS), (surface, SURFACE_KEYS)):
+        groups = defaultdict(Counter)
+        try:
+            records = scan_grib(path)
+            for m in records:
+                groups[m.when][m.field] += 1
+            lines.append(f"{path}: {len(records)} indexed messages, {len(groups)} UTC hours")
+            lines.append(f"  grids={sorted(set(m.grid for m in records))}")
+            lines.append(f"  levels={sorted(set(m.field[0] for m in records), reverse=True)}; "
+                         f"paramIds={sorted(set(m.field[1] for m in records))}")
+            if records:
+                lines.append(f"  byte offsets {min(m.offset for m in records)}.."
+                             f"{max(m.offset+m.size for m in records)} / {path.stat().st_size}")
+            if groups:
+                lines.append(f"  valid UTC {min(groups).isoformat()} .. {max(groups).isoformat()}")
+            by_file.append((path, set(keys), groups))
+        except Exception as exc:
+            # Diagnostic failure must not hide the original converter error.
+            lines.append(f"{path}: header scan failed: {type(exc).__name__}: {exc}")
+    hours = sorted(set(t for _, _, groups in by_file for t in groups))
+    for a, b in zip(hours, hours[1:]):
+        if b - a != timedelta(hours=1):
+            lines.append(f"  Gap between {a.isoformat()} and {b.isoformat()}")
+    for path, keys, groups in by_file:
+        complete = 0
+        for t in hours:
+            fields = groups.get(t, Counter())
+            missing = sorted(keys - fields.keys())
+            duplicates = sorted((k, n) for k, n in fields.items() if n > 1)
+            if missing or duplicates:
+                lines.append(f"  {t.isoformat()} {path.name}: {sum(fields.values())} records; "
+                             f"missing={missing}; duplicates={duplicates}")
+            else:
+                complete += 1
+        lines.append(f"  {path.name}: {complete}/{len(hours)} hours with all required fields and no duplicates")
+    return "\n".join(lines)
+
+
+def _append_log(path, text):
+    with path.open("a", encoding="utf-8", errors="replace") as f:
+        f.write(text.rstrip() + "\n")
 
 
 def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
@@ -227,14 +283,21 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
     require_native_windows()
     pressure, surface = Path(pressure), Path(surface)
     converter, destination = Path(converter).resolve(), Path(destination)
-    if not converter.is_file() or converter.suffix.lower() != ".exe":
-        raise FileNotFoundError(f"Native Windows grib2arl.exe not found: {converter}")
-    if level_count < 2:
-        raise ValueError("ARL requires surface and at least one upper level")
-    require_grib1(pressure)
-    require_grib1(surface)
     destination.parent.mkdir(parents=True, exist_ok=True)
     log_path = destination.with_suffix(destination.suffix + ".log")
+    _append_log(log_path, f"\n=== HYSPLIT Batch {__version__}: {datetime.now(timezone.utc).isoformat()} ===")
+    try:
+        if not converter.is_file() or converter.suffix.lower() != ".exe":
+            raise FileNotFoundError(f"Native Windows grib2arl.exe not found: {converter}")
+        if level_count < 2:
+            raise ValueError("ARL requires surface and at least one upper level")
+        _append_log(log_path, f"Converter: {converter}; SHA256={hashlib.sha256(converter.read_bytes()).hexdigest()}")
+        for path in (pressure, surface):
+            require_grib1(path)
+            _append_log(log_path, f"Input GRIB1: {path}; bytes={path.stat().st_size}")
+    except (OSError, ValueError) as exc:
+        _append_log(log_path, f"Preflight failed: {type(exc).__name__}: {exc}")
+        raise
     staged = destination.with_suffix(destination.suffix + ".part")
     if staged.exists():
         raise RuntimeError(
@@ -245,6 +308,7 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
         str(converter), "-iDATA.GRIB", "-sSFC.GRIB", "-g3", "-p1",
         f"-k{level_count}", "-q0", "-z1",
     ]
+    _append_log(log_path, f"Command: {subprocess.list2cmdline(args)}")
     if notify:
         notify(f"Windows grib2arl: converting {pressure.name}")
 
@@ -252,9 +316,17 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
     # CFG_ARL. Retry that specific Fortran input-conversion failure once in a
     # fresh temporary directory; do not repeat unrelated conversion errors.
     for attempt in (1, 2):
-        _check_conversion_space(pressure, surface, destination, notify,
-                                expected_arl_bytes=expected_arl_bytes)
+        _append_log(log_path, f"Attempt {attempt}/2: {datetime.now(timezone.utc).isoformat()}; "
+                    f"disk free bytes={shutil.disk_usage(destination.parent).free}; "
+                    f"expected ARL bytes={expected_arl_bytes}")
+        try:
+            _check_conversion_space(pressure, surface, destination, notify,
+                                    expected_arl_bytes=expected_arl_bytes)
+        except OSError as exc:
+            _append_log(log_path, f"Disk preflight failed: {exc}")
+            raise
         work_path: Path | None = None
+        started = time.monotonic()
         try:
             with tempfile.TemporaryDirectory(prefix="hysplit_grib1_", dir=destination.parent) as tmp:
                 work = Path(tmp)
@@ -266,9 +338,10 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
                     except OSError:
                         shutil.copyfile(src, target)
 
-                mode = "w" if attempt == 1 else "a"
-                with log_path.open(mode, encoding="utf-8", errors="replace") as log:
+                with log_path.open("a", encoding="utf-8", errors="replace") as log:
                     log.write(f"\n=== grib2arl attempt {attempt}/2 ===\n")
+                    log.flush()
+                    stdout_start = log_path.stat().st_size
                     process = None
                     try:
                         process = subprocess.Popen(
@@ -295,8 +368,8 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
                         response_code = process.returncode
                     except OSError as exc:
                         diagnostic, _warnings = _converter_messages(work, include_config=True)
-                        if diagnostic:
-                            log.write(f"\n{diagnostic}\n")
+                        log.write(f"\nLaunch error: {exc}\n{diagnostic}\n"
+                                  f"{_grib_inventory(pressure, surface)}\n")
                         raise RuntimeError(
                             f"grib2arl execution failed: {exc}; log: {log_path}"
                         ) from exc
@@ -311,13 +384,14 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
                         raise
 
                 result = work / "DATA.ARL"
-                if not response_code and result.is_file() and result.stat().st_size > 0:
-                    diagnostic, warnings = _converter_messages(work, include_config=False)
-                    if diagnostic:
-                        with log_path.open("a", encoding="utf-8", errors="replace") as log:
-                            log.write(f"\n{diagnostic}\n")
-                        if notify:
-                            notify("ERA5 conversion warning: " + " | ".join(warnings[:4]))
+                result_bytes = result.stat().st_size if result.is_file() else 0
+                _append_log(log_path, f"Exit code={response_code}; elapsed={time.monotonic()-started:.2f}s; "
+                            f"ARL bytes={result_bytes}")
+                if not response_code and result_bytes > 0:
+                    diagnostic, warnings = _converter_messages(work, include_config=True)
+                    _append_log(log_path, diagnostic)
+                    if notify and warnings:
+                        notify("ERA5 conversion warning: " + " | ".join(warnings[:4]))
                     check_signature(result)
                     # Staging file is only published after NOAA filedates validation.
                     # The work directory is created under destination.parent,
@@ -326,17 +400,20 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
                     os.replace(result, staged)
                     return staged
 
-                output = log_path.read_text(encoding="utf-8", errors="replace")
+                # Do not mistake an older appended error for this attempt.
+                with log_path.open("rb") as f:
+                    f.seek(stdout_start)
+                    output = f.read().decode("utf-8", errors="replace")
                 retryable_cfg_error = (
                     response_code == 64
                     and "forrtl: severe (64): input conversion error" in output.lower()
                     and "cfg_arl" in output.lower()
                 )
                 diagnostic, _warnings = _converter_messages(work, include_config=True)
-                if diagnostic:
-                    with log_path.open("a", encoding="utf-8", errors="replace") as log:
-                        log.write(f"\n{diagnostic}\n")
+                _append_log(log_path, diagnostic)
+                _append_log(log_path, _grib_inventory(pressure, surface))
                 if retryable_cfg_error and attempt == 1:
+                    _append_log(log_path, "Retrying CFG_ARL read failure in a fresh temporary directory.")
                     if notify:
                         notify("grib2arlのCFG_ARL読込エラーを検出。新しい一時領域で1回再試行します。")
                 else:
