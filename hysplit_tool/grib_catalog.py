@@ -46,16 +46,41 @@ def matches_grid(g,bbox):
         return nx==1440 and eq((lo2-lo1)%360,(nx-1)*dx if not neg else dx)
     return eq((nx-1)*dx,east-west) and eq(((lo2 if neg else lo1)-west+180)%360-180,0)
 
+def read_grib_message(e, stream):
+    """Return an ecCodes handle and a 64-bit file position.
+
+    On Windows, codes_get_message_offset can return zero or a wrapped
+    position beyond 2 GiB. The unbuffered Python file position after
+    reading the message is independent of that ecCodes offset.
+    """
+    start=stream.tell()
+    handle=e.codes_grib_new_from_file(stream,headers_only=True)
+    if handle is None:
+        return None
+    try:
+        length=int(e.codes_get_message_size(handle))
+        end=stream.tell()
+        offset=end-length
+        if length<=0 or offset<start:
+            raise ValueError(f"Invalid GRIB record boundary: {start}, {end}, {length}")
+        return handle,offset,length
+    except BaseException:
+        e.codes_release(handle)
+        raise
+
+
 @lru_cache(maxsize=128)
 def _scan(path_text,size,mtime):
     import eccodes as e
     path=Path(path_text)
     records=[]
     levels=frozenset(map(int,PRESSURE_LEVELS))
-    with path.open("rb") as f:
+    # Never mix Python read-ahead with the native reader's file position.
+    with path.open("rb",buffering=0) as f:
         while True:
-            h=e.codes_grib_new_from_file(f,headers_only=True)
-            if h is None:break
+            result=read_grib_message(e,f)
+            if result is None:break
+            h,offset,length=result
             try:
                 if e.codes_get(h,"edition")!=1:
                     raise ValueError(f"GRIB edition other than 1: {path.name}")
@@ -72,8 +97,7 @@ def _scan(path_text,size,mtime):
                 # Keep only HYSPLIT fields in this index. The source archive
                 # retains every other variable unchanged.
                 if key[0] in levels or key in REQUIRED_KEYS:
-                    records.append(Message(path,int(e.codes_get_message_offset(h)),
-                        int(e.codes_get_message_size(h)),_grid(e,h),t,key))
+                    records.append(Message(path,offset,length,_grid(e,h),t,key))
             finally:
                 e.codes_release(h)
     return tuple(records)

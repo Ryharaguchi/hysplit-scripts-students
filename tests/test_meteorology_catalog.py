@@ -135,4 +135,19 @@ class TestCatalog(unittest.TestCase):
             self.assertEqual(allowed.returncode,0,allowed.stderr)
             self.assertIn("acquired",allowed.stdout)
 
+    def test_grib_offsets_use_64bit_stream_position_not_eccodes_offset(self):
+        from unittest.mock import Mock
+        from hysplit_tool.grib_catalog import read_grib_message
+        for start in (0,2**31+123,2**32+456,11_078_941_140):
+            with self.subTest(start=start):
+                e=Mock()
+                stream=Mock()
+                length=1_039_788
+                stream.tell.side_effect=[start,start+length]
+                e.codes_get_message_size.return_value=length
+                e.codes_get_message_offset.side_effect=AssertionError("must not read 32-bit offset")
+                self.assertEqual(read_grib_message(e,stream),
+                                 (e.codes_grib_new_from_file.return_value,start,length))
+                e.codes_grib_new_from_file.assert_called_once_with(stream,headers_only=True)
+
 if __name__=="__main__":unittest.main()
