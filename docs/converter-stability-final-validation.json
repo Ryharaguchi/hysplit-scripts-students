@@ -1,0 +1,149 @@
+{
+  "first_patch_real_48h": {
+    "hours": 48,
+    "grid": [
+      1440,
+      361
+    ],
+    "pressure_levels": 37,
+    "returncode": 0,
+    "seconds_including_validation": 238.3,
+    "bytes": 5714630880,
+    "reference_sha256": "3ec89538803bcb7af00b2b6bb95a28d8b69592d32815d3d758312c3a961f5ada",
+    "patched_sha256": "3ec89538803bcb7af00b2b6bb95a28d8b69592d32815d3d758312c3a961f5ada",
+    "identical_hourly_blocks": 48,
+    "different_hourly_indices": []
+  },
+  "final_patch_real_48h": {
+    "hours": 48,
+    "grid": [
+      1440,
+      361
+    ],
+    "pressure_levels": 37,
+    "returncode": 0,
+    "seconds_including_validation": 241.41,
+    "bytes": 5714630880,
+    "converter_sha256": "39493a7e1e0bae1c4a95323ab3650875873ff54e24fc46c7ca5f0b8c978a5771",
+    "reference_sha256": "3ec89538803bcb7af00b2b6bb95a28d8b69592d32815d3d758312c3a961f5ada",
+    "patched_sha256": "3ec89538803bcb7af00b2b6bb95a28d8b69592d32815d3d758312c3a961f5ada",
+    "identical_hourly_blocks": 48,
+    "different_hourly_indices": []
+  },
+  "final_patch_synthetic_124h": {
+    "synthetic": true,
+    "hours": 124,
+    "grid": [
+      40,
+      40
+    ],
+    "exe_sha256": "39493a7e1e0bae1c4a95323ab3650875873ff54e24fc46c7ca5f0b8c978a5771",
+    "cases": [
+      {
+        "label": "whole124",
+        "hours": 124,
+        "status": "PASS",
+        "bytes": 47058000,
+        "seconds": 0.875
+      },
+      {
+        "label": "slice0",
+        "hours": 6,
+        "status": "PASS",
+        "bytes": 2277000,
+        "seconds": 0.109
+      },
+      {
+        "label": "slice1",
+        "hours": 24,
+        "status": "PASS",
+        "bytes": 9108000,
+        "seconds": 0.25
+      },
+      {
+        "label": "slice2",
+        "hours": 24,
+        "status": "PASS",
+        "bytes": 9108000,
+        "seconds": 0.203
+      },
+      {
+        "label": "slice3",
+        "hours": 24,
+        "status": "PASS",
+        "bytes": 9108000,
+        "seconds": 0.187
+      },
+      {
+        "label": "slice4",
+        "hours": 24,
+        "status": "PASS",
+        "bytes": 9108000,
+        "seconds": 0.172
+      },
+      {
+        "label": "slice5",
+        "hours": 22,
+        "status": "PASS",
+        "bytes": 8349000,
+        "seconds": 0.172
+      }
+    ],
+    "identical_whole_and_split": true
+  },
+  "offline_app_124h": {
+    "status": "PASS",
+    "synthetic": true,
+    "hours": 124,
+    "files": 6,
+    "hours_per_file": [
+      6,
+      24,
+      24,
+      24,
+      24,
+      22
+    ],
+    "byte_identical_to_whole": true,
+    "no_download": true,
+    "all_arl_logs_have_validation": true,
+    "sha256": "63ee8449fcadd0eb03801a28ee206c261f0aa76b958673943e42439d7969663f",
+    "seconds": 18.75
+  },
+  "failure_logging": {
+    "status": "PASS",
+    "test": "intentionally remove geopotential from synthetic two-hour GRIB, not student data",
+    "application_version": "0.1.2",
+    "failure_code": 1131,
+    "attempts_recorded": 2,
+    "log_files": 1,
+    "log_bytes": 30600,
+    "new_input_gap_identified": true
+  },
+  "app_only_release": {
+    "status": "PASS",
+    "version": "0.1.2",
+    "source_commit": "63f3206",
+    "bytes": 91269889,
+    "sha256": "2675a1e6b172dcd3d7ee0470ca7de03962d66a45236692d1ce949024dc54f1ea",
+    "files": 3704,
+    "uncompressed_bytes": 248890758,
+    "exe_sha256": "6fc0710febe225d9f942fe2c50abe1a13ec32c62dd5b4a1282c92e75525aa807",
+    "contains_noaa_converter": false,
+    "packaging_selftest_passed": true,
+    "drive_cloud_sync_verified": false
+  },
+  "eof_reader_boundary_tests": [
+    2048,
+    4096,
+    4113
+  ],
+  "regression": {
+    "passed": 133,
+    "skipped": 1,
+    "subtests_passed": 41
+  },
+  "intermediate_duplicate_removed_bytes": 5714630880,
+  "final_candidate_and_prior_reference_retained": true,
+  "free_d_gib_after": 7.6
+}
