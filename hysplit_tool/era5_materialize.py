@@ -300,6 +300,10 @@ class Era5Materializer:
                 with log.open("a",encoding="utf-8") as f:
                     f.write(f"\nARL validation failure: {type(exc).__name__}: {exc}\n")
                 raise RuntimeError(f"ARL validation failure: {exc}; log: {log}") from exc
+            with dest.with_suffix(".arl.log").open("a",encoding="utf-8") as f:
+                f.write(f"ARL validation passed: {len(info.times)} UTC hours; "
+                        f"grid={info.grid[:2]}; pressure levels={len(info.levels)-1}; "
+                        f"bytes={staged.stat().st_size}; NOAA filedates verified\n")
             staged.replace(dest)
             metadata={"provider":self.provider,"field_profile":self.profile,
                       "first":wanted[0].isoformat(),"last":wanted[-1].isoformat(),

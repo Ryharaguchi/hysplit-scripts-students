@@ -1,3 +1,10 @@
+【v0.1.2（2026-11-26）】
+アプリのみの更新版です。既存のHYSPLIT_WorkとNOAA HYSPLIT本体は変更せず、EXEと_internalをセットで交換してください。
+ARL変換時の既存 .arl.log に、入力情報・実行条件・終了コード・MESSAGE/WARNING/CFG_ARL全文を追記します。
+失敗時は同じログ内にGRIBの気圧面・変数・時刻の欠落や重複を記録します。新しいログ用フォルダやZIPは作成しません。
+NOAA変換器の修正版はローカル検証中で、このZIPには含まれていません。
+学生環境のエラー1131の解消は未確認です。失敗した場合は元データを残し、該当 .arl.log を共有してください。
+
 【v0.1.1（2026-11-26）】
 既存のHYSPLIT_Work（気象データ）を削除せず、EXEと_internalをセットで更新してください。
 日別GRIB分割・ARL変換と大容量GRIBの64ビット位置参照を採用しました。
@@ -16,9 +23,9 @@ HYSPLIT Batch Trajectories — Windows x64 ポータブル版
 2. Python、WSL、PowerShell、Gitなどの開発環境は不要です。
    Windows 10/11 (64ビット) を想定しています。Windows以外には対応しません。
 
-3. この統合ZIPにはアプリとHYSPLIT本体が含まれます。
-   展開後、HYSPLIT\exec\hyts_std.exe、grib2arl.exe、filedates.exeと
-   HYSPLIT\bdyfilesが同じフォルダ内にあることを確認してください。
+3. このZIPにはアプリのみが含まれます。NOAA HYSPLITは各PCで正規導入してください。
+   既に導入済みのHYSPLIT\exec\hyts_std.exe、grib2arl.exe、filedates.exeと
+   HYSPLIT\bdyfilesを維持し、アプリのGUIで実行ファイルを指定してください。
    アプリは隣接するHYSPLIT\exec\hyts_std.exeを自動検出します。
    ZIP全体を展開し、HYSPLIT_Batch.exeだけを別の場所へ移動しないでください。
    NOAAの使用条件に従って利用してください。
