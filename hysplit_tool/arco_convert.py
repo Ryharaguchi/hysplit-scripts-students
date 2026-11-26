@@ -431,7 +431,9 @@ def _encode_message(e, output, values, when: datetime, *,
 def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
                     surface_grib: Path,
                     notify: Callable[[str], None] | None = None, *,
-                    quality_report: dict[str, object] | None = None
+                    quality_report: dict[str, object] | None = None,
+                    wanted_times: tuple[datetime, ...] | None = None,
+                    bbox: tuple[float, float, float, float] | None = None,
                     ) -> tuple[datetime, datetime]:
     """Convert a validated ERA5 ARCO NetCDF regional subset to two GRIB1 files."""
     # Distinguish a broken PyInstaller module archive from meteorological
@@ -459,7 +461,17 @@ def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
     netcdf = Path(netcdf)
     if not netcdf.is_file():
         raise FileNotFoundError(netcdf)
-    ds = xr.open_dataset(netcdf, engine="netcdf4")
+    original = xr.open_dataset(netcdf, engine="netcdf4")
+    ds = original
+    if wanted_times is not None:
+        try:
+            ds = ds.sel(time=[np.datetime64(t.replace(tzinfo=None), "s") for t in wanted_times])
+        except Exception:
+            original.close()
+            raise
+    if bbox is not None:
+        from .era5 import _subset_arco_domain
+        ds = _subset_arco_domain(ds, bbox)
     pressure_grib, surface_grib = Path(pressure_grib), Path(surface_grib)
     pressure_grib.parent.mkdir(parents=True, exist_ok=True)
     surface_grib.parent.mkdir(parents=True, exist_ok=True)
@@ -505,6 +517,7 @@ def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
         )
         check_arco_conversion_space(
             estimated_grib_bytes, pressure_grib, notify=notify,
+            expected_arl_bytes=len(times)*(1+37*6+6)*(len(lat)*len(lon)+50),
         )
         # Confirm grid coverage explicitly. No interpolation or extrapolation.
         with upper_tmp.open("wb") as upper, lower_tmp.open("wb") as lower:
@@ -585,7 +598,7 @@ def netcdf_to_grib1(netcdf: Path, pressure_grib: Path,
             })
         return times[0], times[-1]
     finally:
-        ds.close()
+        original.close()
         for tmp in (upper_tmp, lower_tmp):
             tmp.unlink(missing_ok=True)
 

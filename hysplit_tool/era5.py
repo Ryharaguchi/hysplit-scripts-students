@@ -234,7 +234,7 @@ def _month_day_hours(earliest: datetime, latest: datetime):
 def download_cds(earliest: datetime, latest: datetime, target_dir: Path,
                  bbox: tuple[float, float, float, float],
                  notify: Callable[[str], None] | None = None,
-                 field_profile: str = "allvars") -> list[Path]:
+                 field_profile: str = "allvars", *, exact_hours: bool = False) -> list[Path]:
     """Download upper-air and surface ERA5 as GRIB; needs CDS credentials/license."""
     if field_profile not in ("hysplit", "allvars"):
         raise ValueError("ERA5 field_profile must be 'hysplit' or 'allvars'")
@@ -249,7 +249,16 @@ def download_cds(earliest: datetime, latest: datetime, target_dir: Path,
     pressure_fields = (
         HYSPLIT_PRESSURE_FIELDS if field_profile == "hysplit" else PRESSURE_FIELDS
     )
-    for (year, month), selection in _month_day_hours(earliest, latest).items():
+    if exact_hours:
+        if earliest.date() != latest.date() or earliest > latest or any(
+                t.minute or t.second or t.microsecond for t in (earliest,latest)):
+            raise ValueError("Exact CDS request must be a single UTC date at whole hours")
+        slots={(earliest.year,earliest.month): {
+            "days": {f"{earliest.day:02d}"},
+            "hours": {f"{h:02d}:00" for h in range(earliest.hour,latest.hour+1)}}}
+    else:
+        slots=_month_day_hours(earliest,latest)
+    for (year, month), selection in slots.items():
         days = sorted(selection["days"])
         hours = sorted(selection["hours"])
         for variant, dataset, fields in (

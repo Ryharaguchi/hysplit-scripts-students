@@ -40,6 +40,7 @@ from .progress import TaskProgress
 from .work_budget import WorkBudget
 from .app_settings import load_settings, save_settings, settings_path
 from .retention import cleanup_successful_meteorology, cleanup_successful_run
+from .arl_catalog import files_for_window
 
 PROVIDERS = {
     "GDAS1 (1°)": "gdas1",
@@ -883,6 +884,7 @@ class App(tk.Tk):
             progress.start(f"{label}：気象データ時刻を検証")
             report = check_coverage(
                 list(met_paths), window.start, window.end, filedates,
+                max_gap_hours=1.0 if provider in ("era5_cds","arco_era5") else 6.0,
             )
             for message in report.messages:
                 self._notify(f"Meteorology {index + 1}/{len(windows)}: {message}")
@@ -910,11 +912,15 @@ class App(tk.Tk):
                 raise RuntimeError(f"No HYSPLIT groups belong to {window}")
             folders = [
                 write_group(
-                    group, run_root, list(met_paths), int(conf["hours"]),
+                    group, run_root,
+                    files_for_window(met_paths, TimeWindow(group.when-timedelta(hours=int(conf["hours"])),group.when))
+                    if provider in ("era5_cds","arco_era5") else list(met_paths),
+                    int(conf["hours"]),
                     float(conf["internal_model_top_m_agl"]), conf["height_ref"],
                     bdyfiles, diagnostics=conf["met_diagnostics"],
                     output_interval_minutes=int(conf["output_interval_minutes"]),
                     integration_step_minutes=int(conf["integration_step_minutes"]),
+                    single_grid=provider in ("era5_cds","arco_era5","gdas1","gfs0p25"),
                 )
                 for group in period_groups
             ]
@@ -1144,7 +1150,7 @@ class App(tk.Tk):
             run_root, group_folders, notify=self._notify,
         )
         metadata["run_working_files_cleanup"] = run_cleanup
-        if provider != "local":
+        if provider not in ("local","era5_cds","arco_era5"):
             cache_cleanup = cleanup_successful_meteorology(
                 met_dir,
                 (path for window in windows
@@ -1159,7 +1165,12 @@ class App(tk.Tk):
             )
         else:
             metadata["meteorology_cache_retained"] = True
-            metadata["meteorology_sources_retained"] = True
+            metadata["meteorology_sources_retained"] = (
+                True if provider=="local" else
+                bool(conf.get("keep_met_sources",False) or conf.get("era5_field_profile")=="allvars")
+            )
+            if provider in ("era5_cds","arco_era5"):
+                metadata["existing_meteorology_sources_preserved"]=True
         save_manifest()
         self.events.put(("done", str(run_root)))
 

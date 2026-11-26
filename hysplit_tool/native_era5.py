@@ -160,7 +160,8 @@ def _probe_hardlink(directory: Path) -> bool:
 
 
 def check_arco_conversion_space(estimated_grib_bytes: int, destination: Path,
-                               notify: Callable[[str], None] | None = None) -> None:
+                               notify: Callable[[str], None] | None = None, *,
+                               expected_arl_bytes: int | None = None) -> None:
     """Check peak free space before ARCO creates its large intermediate GRIBs.
 
     The peak includes both GRIB files and one ARL. The converter output is
@@ -171,11 +172,9 @@ def check_arco_conversion_space(estimated_grib_bytes: int, destination: Path,
     if estimated_grib_bytes < 1:
         raise ValueError("Estimated ARCO GRIB size must be positive")
     work_dir = Path(destination).parent
-    previous_arl_sizes = [
-        path.stat().st_size for path in work_dir.glob("*.arl")
-        if path.is_file() and path.stat().st_size > 0
-    ]
-    estimated_arl = max([1, estimated_grib_bytes // 2, *previous_arl_sizes])
+    # Other cached periods may be much longer and are not estimates for
+    # this conversion. When known, use the requested ARL record count.
+    estimated_arl = expected_arl_bytes if expected_arl_bytes is not None else max(1,estimated_grib_bytes//2)
     copied_inputs = 0 if _probe_hardlink(work_dir) else estimated_grib_bytes
     required = estimated_grib_bytes + estimated_arl + copied_inputs
     available = shutil.disk_usage(work_dir).free
@@ -196,18 +195,13 @@ def check_arco_conversion_space(estimated_grib_bytes: int, destination: Path,
 
 
 def _check_conversion_space(pressure: Path, surface: Path, destination: Path,
-                            notify: Callable[[str], None] | None = None) -> None:
+                            notify: Callable[[str], None] | None = None, *,
+                            expected_arl_bytes: int | None = None) -> None:
     """Avoid starting grib2arl when one output ARL and required copies cannot fit."""
     work_dir = destination.parent
     pressure_size, surface_size = pressure.stat().st_size, surface.stat().st_size
     input_size = pressure_size + surface_size
-    previous_arl_sizes = [
-        path.stat().st_size for path in work_dir.glob("*.arl")
-        if path.is_file() and path.stat().st_size > 0
-    ]
-    # Use the larger of prior completed output and half the current GRIB pair.
-    # The latter is a conservative first-run estimate for this ERA5 profile.
-    estimated_arl = max([1, input_size // 2, *previous_arl_sizes])
+    estimated_arl = expected_arl_bytes if expected_arl_bytes is not None else max(1,input_size//2)
     hardlinks_available = (
         pressure.stat().st_dev == work_dir.stat().st_dev
         and surface.stat().st_dev == work_dir.stat().st_dev
@@ -308,7 +302,8 @@ def _converter_messages(work: Path, *, include_config: bool) -> tuple[str, tuple
 def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
                           converter: Path, *,
                           level_count: int = len(PRESSURE_LEVELS) + 1,
-                          notify: Callable[[str], None] | None = None) -> Path:
+                          notify: Callable[[str], None] | None = None,
+                          expected_arl_bytes: int | None = None) -> Path:
     """Run legacy grib2arl.exe in an isolated working directory.
 
     HYSPLIT's legacy converter uses local names DATA.GRIB and SFC.GRIB;
@@ -342,7 +337,8 @@ def run_native_grib1_pair(pressure: Path, surface: Path, destination: Path,
     # CFG_ARL. Retry that specific Fortran input-conversion failure once in a
     # fresh temporary directory; do not repeat unrelated conversion errors.
     for attempt in (1, 2):
-        _check_conversion_space(pressure, surface, destination, notify)
+        _check_conversion_space(pressure, surface, destination, notify,
+                                expected_arl_bytes=expected_arl_bytes)
         work_path: Path | None = None
         try:
             with tempfile.TemporaryDirectory(prefix="hysplit_grib1_", dir=destination.parent) as tmp:

@@ -461,7 +461,7 @@ def automatic_model_top(starts: Iterable[StartPoint]) -> float:
     return max(25000.0, 1000.0 * math.ceil((max(heights) + 1000.0) / 1000.0))
 
 
-def render_control(group: RunGroup, met_paths: list[Path], back_hours: int, model_top_m: float) -> str:
+def render_control(group: RunGroup, met_paths: list[Path], back_hours: int, model_top_m: float, *, single_grid: bool = False) -> str:
     if back_hours <= 0 or back_hours > 9999:
         raise ValueError("Backward duration must be 1..9999 hours")
     if not met_paths:
@@ -472,7 +472,7 @@ def render_control(group: RunGroup, met_paths: list[Path], back_hours: int, mode
     # Per HYSPLIT CONTROL spec, minutes can be included in start time.
     lines = [group.when.strftime("%y %m %d %H %M"), str(len(group.points))]
     lines.extend(f"{p.latitude:.6f} {p.longitude:.6f} {p.height_m:.2f}" for p in group.points)
-    lines.extend([str(-back_hours), "0", f"{model_top_m:.1f}", str(len(met_paths))])
+    lines.extend([str(-back_hours), "0", f"{model_top_m:.1f}", f"1 {len(met_paths)}" if single_grid else str(len(met_paths))])
     for met in met_paths:
         met = Path(met).resolve()
         lines.extend([met.parent.as_posix().rstrip("/") + "/", met.name])
@@ -514,7 +514,8 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
                 bdyfiles_dir: Path | None = None,
                 diagnostics: Iterable[str] = (),
                 output_interval_minutes: int = 60,
-                integration_step_minutes: int = 0) -> Path:
+                integration_step_minutes: int = 0,
+                *, single_grid: bool = False) -> Path:
     if height_reference not in ("AGL", "MSL"):
         raise ValueError("Height reference must be AGL or MSL")
     tout, delt = validate_time_controls(output_interval_minutes,
@@ -524,7 +525,7 @@ def write_group(group: RunGroup, run_root: Path, met_paths: list[Path], back_hou
         + f"_{group.ordinal:05d}"
     )
     folder.mkdir(parents=True, exist_ok=False)
-    (folder / "CONTROL").write_text(render_control(group, met_paths, back_hours, model_top_m), encoding="ascii")
+    (folder / "CONTROL").write_text(render_control(group, met_paths, back_hours, model_top_m, single_grid=single_grid), encoding="ascii")
     # KMSL sets how CONTROL starting heights are interpreted.
     # KAGL=1 fixes tdump heights to AGL. TM_TERR=1 adds terrain MSL,
     # enabling terrain elevation and estimated trajectory MSL in CSV.
